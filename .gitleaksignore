@@ -1,0 +1,20 @@
+# Gitleaks ignore list for test suite mock credentials and documentation examples
+docs/user-guide/security.md:generic-api-key:278
+src/openjarvis/evals/datasets/research_mining.py:generic-api-key:211
+src/openjarvis/evals/datasets/security_scanner.py:generic-api-key:70
+tests/analytics/test_redaction.py:jwt:68
+tests/analytics/test_redaction.py:generic-api-key:137
+tests/security/test_log_sanitization.py:generic-api-key:72
+tests/security/test_boundary_guard.py:generic-api-key:73
+tests/security/test_boundary_guard.py:generic-api-key:86
+tests/security/test_boundary_guard.py:generic-api-key:94
+tests/security/test_guardrails.py:generic-api-key:405
+tests/security/test_guardrails.py:generic-api-key:452
+tests/security/test_guardrails.py:generic-api-key:469
+tests/security/test_guardrails.py:generic-api-key:487
+tests/security/test_taint.py:generic-api-key:111
+tests/security/test_taint.py:generic-api-key:140
+tests/server/test_webhook_routes.py:generic-api-key:119
+tests/server/test_webhook_routes.py:generic-api-key:134
+tests/security/test_scanner.py:stripe-access-token:80
+tests/tools/test_fx_macro.py:generic-api-key:17
