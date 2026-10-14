@@ -1,3 +1,7 @@
+# Jarvis
+
+This repo contains projects of Jarvis I made, configured for local Ollama inference and exclusive web research via The Deep View.
+
 <div align="center">
   <img alt="OpenJarvis" src="assets/OpenJarvis_Horizontal_Logo.png" width="400">
 
