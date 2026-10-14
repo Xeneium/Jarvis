@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import List, Optional
 
@@ -129,9 +130,31 @@ def chat(
 
     register_builtin_models()
 
-    resolved = get_engine(config, engine_key)
-    if resolved is None:
-        console.print("[red]No inference engine available.[/red]")
+    target_engine_key = (
+        engine_key
+        or os.environ.get("OPENJARVIS_DEFAULT_ENGINE")
+        or getattr(config.engine, "default", None)
+        or "ollama"
+    )
+
+    resolved = get_engine(config, target_engine_key)
+    if resolved is None and target_engine_key == "ollama":
+        console.print("[bold red]Ollama local inference engine is not reachable at http://localhost:11434[/bold red]")
+        console.print(
+            "\n[yellow]To chat with OpenJarvis locally via Ollama:[/yellow]\n"
+            "  1. Start Ollama in a terminal: [cyan]ollama serve[/cyan] (or launch the Ollama desktop app)\n"
+            "  2. Pull a model if you haven't yet: [cyan]ollama pull gemma4:latest[/cyan]\n"
+            "  3. Rerun: [cyan]python main.py[/cyan]\n"
+        )
+        sys.exit(1)
+    elif resolved is None:
+        console.print("[bold red]No inference engine is currently available.[/bold red]")
+        console.print(
+            "\n[yellow]To chat with OpenJarvis, make sure an inference backend is running or configured:[/yellow]\n"
+            "  • [bold]Local Engine (Ollama):[/bold] Start Ollama with [cyan]`ollama serve`[/cyan] and run [cyan]`ollama run llama3.2`[/cyan]\n"
+            "  • [bold]Cloud Engine:[/bold] Set your API key in the terminal (e.g. [cyan]$env:OPENAI_API_KEY=\"sk-...\"[/cyan] or [cyan]$env:ANTHROPIC_API_KEY[/cyan] or [cyan]$env:NIM_API_KEY[/cyan])\n"
+            "  • [bold]Setup Wizard:[/bold] Run [cyan]python main.py init[/cyan] to detect hardware and set up an engine automatically.\n"
+        )
         sys.exit(1)
 
     engine_name, engine = resolved
@@ -150,6 +173,7 @@ def chat(
         picked = interactive_pick_model(console, engine)
         if picked:
             model = picked
+
     if not model:
         model = resolve_chat_cli_model(
             console=console,
@@ -159,6 +183,8 @@ def chat(
             cli_model=model_name,
             chat_variant="chat",
         )
+    if engine_name == "ollama" and model and "qwen" in model.lower():
+        model = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
     if not model:
         console.print("[red]No model available.[/red]")
         sys.exit(1)
@@ -169,11 +195,40 @@ def chat(
         tty_wants_runtime_panel,
     )
 
+    default_exclusive = os.environ.get("OPENJARVIS_EXCLUSIVE_SOURCE", "").lower() in (
+        "thedeepview",
+        "deep_view",
+        "the_deep_view",
+    )
+
     if engine_name != "ollama" and (num_ctx is not None or num_gpu is not None):
         raise click.UsageError(
             "--num-ctx and --num-gpu are supported only with --engine ollama"
         )
-    if engine_name == "ollama" and tty_wants_runtime_panel(skip_runtime_panel):
+
+    # Resolve default num_ctx and num_gpu from environment/defaults if omitted
+    if engine_name == "ollama":
+        if num_ctx is None:
+            raw_ctx = os.environ.get("JARVIS_NUM_CTX") or os.environ.get("OLLAMA_NUM_CTX")
+            if raw_ctx is not None and raw_ctx != "":
+                try:
+                    num_ctx = int(raw_ctx)
+                except ValueError:
+                    pass
+            elif default_exclusive:
+                num_ctx = 16_384
+
+        if num_gpu is None:
+            raw_gpu = os.environ.get("JARVIS_NUM_GPU") or os.environ.get("OLLAMA_NUM_GPU")
+            if raw_gpu is not None and raw_gpu != "":
+                try:
+                    num_gpu = int(raw_gpu)
+                except ValueError:
+                    pass
+            elif default_exclusive:
+                num_gpu = 1
+
+    if engine_name == "ollama" and tty_wants_runtime_panel(skip_runtime_panel or default_exclusive):
         runtime_opts = interactive_pick_runtime_options(
             console,
             engine_name=engine_name,
@@ -196,7 +251,12 @@ def chat(
 
     # Resolve agent (optional)
     agent = None
-    agent_key = agent_name or config.agent.default_agent
+    agent_key = agent_name or (
+        "native_react" if default_exclusive else config.agent.default_agent
+    )
+    if not agent_name and default_exclusive and agent_key in ("simple", "none", None):
+        agent_key = "native_react"
+
     if agent_key and agent_key != "none":
         try:
             import openjarvis.agents  # noqa: F401 — trigger registration
@@ -207,11 +267,14 @@ def chat(
                 kwargs: dict = {"bus": bus}
 
                 if getattr(agent_cls, "accepts_tools", False):
+                    fallback_tools = "deep_view_search" if default_exclusive else None
                     tool_names_list = resolve_tool_names(
-                        tools,
+                        tools or fallback_tools,
                         getattr(config.tools, "enabled", None),
                         getattr(config.agent, "tools", None),
                     )
+                    if default_exclusive and "deep_view_search" not in tool_names_list:
+                        tool_names_list.append("deep_view_search")
                     if tool_names_list:
                         import openjarvis.tools  # noqa: F401 — trigger registration
                         from openjarvis.core.registry import ToolRegistry
@@ -292,6 +355,10 @@ def chat(
     voice_session = VoiceSession(config) if voice_mode else None
 
     # Print banner
+    from openjarvis.cli._banner import print_banner
+
+    print_banner(quiet=False)
+
     voice_hint = (
         "  [magenta]Voice mode ON[/magenta] — type normally, or press Enter "
         "to speak; silence stops recording.\n"
@@ -353,6 +420,17 @@ def chat(
             system_prompt_config=config.system_prompt,
         )
         system_prompt = builder.build()
+
+    if default_exclusive:
+        system_prompt = (system_prompt or "") + (
+            "\n\n# The Deep View Web Research Policy\n"
+            "- The Deep View (https://www.thedeepview.com) is your SOLE and EXCLUSIVE web research source.\n"
+            "- For real-time, time-sensitive, or current AI news, use `deep_view_search`.\n"
+            "- Do NOT consult or cite Google, Bing, DuckDuckGo, Tavily, or any other website.\n"
+            "- For general knowledge questions, answer from your pretrained knowledge without browsing.\n"
+            "- Ground all Deep View claims with citations (URL and publication date).\n"
+            "- If The Deep View does not contain information on the topic, state that no relevant coverage was found on The Deep View."
+        )
 
     history: List[Message] = []
     if system_prompt:

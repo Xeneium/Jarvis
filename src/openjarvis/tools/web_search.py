@@ -68,7 +68,7 @@ FIRECRAWL_KEYS_URL = (
 )
 
 ENGINE_ENV = "OPENJARVIS_WEB_SEARCH_ENGINE"
-ENGINES = ("auto", "youcom", "tavily", "duckduckgo", "serply", "firecrawl")
+ENGINES = ("auto", "youcom", "tavily", "duckduckgo", "serply", "firecrawl", "deep_view")
 
 # Identifies OpenJarvis to You.com. The keyless tier carries no API key, so the
 # User-Agent is the only attribution signal; sent to You.com hosts only.
@@ -163,6 +163,12 @@ class WebSearchTool(BaseTool):
         means a Serply or Firecrawl key only ever wins over having no key at
         all.
         """
+        if (
+            os.environ.get("OPENJARVIS_EXCLUSIVE_SOURCE", "").strip().lower()
+            in ("thedeepview", "deep_view", "the_deep_view")
+            or os.environ.get(ENGINE_ENV, "").strip().lower() == "deep_view"
+        ):
+            return "deep_view"
         if self._engine != "auto":
             return self._engine
         if self._api_key:
@@ -656,6 +662,30 @@ class WebSearchTool(BaseTool):
                 content="No query provided.",
                 success=False,
             )
+
+        engine = self._resolve_engine()
+
+        # Deep View Exclusive Mode: Strictly restricted to https://www.thedeepview.com
+        if engine == "deep_view":
+            from openjarvis.tools.deep_view import TheDeepViewTool, validate_deep_view_url
+
+            url = self._extract_url(query) if not self._is_url(query) else query.strip()
+            if url:
+                try:
+                    validate_deep_view_url(url)
+                except Exception as exc:
+                    return ToolResult(
+                        tool_name="web_search",
+                        content=(
+                            f"Security Policy Violation: URL is not an approved The Deep View source. "
+                            f"{exc}. Only official The Deep View pages are permitted."
+                        ),
+                        success=False,
+                    )
+                return TheDeepViewTool().execute(action="read_article", url=url)
+
+            max_results = params.get("max_results", self._max_results)
+            return TheDeepViewTool().execute(action="search", query=query, limit=max_results)
 
         # If the query contains a URL, fetch it directly instead of searching
         url = self._extract_url(query) if not self._is_url(query) else query.strip()

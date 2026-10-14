@@ -131,3 +131,34 @@ learning.db
 minion_logs/
 *.oj-debug.json
 oj-debug.*.json
+
+# Type checking & coverage
+.mypy_cache/
+.pyre/
+.pytype/
+.tox/
+.coverage.*
+coverage.xml
+
+# Security scanning artifacts
+*gitleaks*.json
+*gitleaks*.sarif
+gitleaks.report
+
+# Local credentials & private keys
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Antigravity & AI assistant artifacts
+.antigravity/
+.gemini/
+
+# Windows system artifacts
+Desktop.ini
+ehthumbs.db
+*.dmp
+*.crash

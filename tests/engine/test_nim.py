@@ -133,3 +133,19 @@ def test_health_falls_back_to_models(respx_mock) -> None:
     assert engine.health() is True
     assert models.called
     engine.close()
+
+
+def test_hosted_nim_requires_api_key(monkeypatch) -> None:
+    monkeypatch.delenv("NIM_API_KEY", raising=False)
+    engine = NIMEngine(host="https://integrate.api.nvidia.com")
+    assert engine.health() is False
+    assert engine.can_serve("google/gemma-3-4b-it") is False
+    assert engine.list_models() == []
+    engine.close()
+
+
+def test_hosted_nim_with_api_key_allows_service(monkeypatch) -> None:
+    monkeypatch.setenv("NIM_API_KEY", "nvapi-test-key")
+    engine = NIMEngine(host="https://integrate.api.nvidia.com")
+    assert engine.can_serve("google/gemma-3-4b-it") is True
+    engine.close()

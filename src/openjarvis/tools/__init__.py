@@ -38,6 +38,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.deep_view  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.weather  # noqa: F401
 except ImportError:
     pass

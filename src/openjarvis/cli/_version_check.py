@@ -75,8 +75,11 @@ def _config_disabled() -> bool:
     tried to express an opt-out and the file has a typo, we should not
     silently flip back to auto-checking against their intent.
     """
-    path = _config_path()
-    if not path.exists():
+    try:
+        path = _config_path()
+        if not path.exists():
+            return False
+    except OSError:
         return False
     try:
         import tomllib
@@ -105,11 +108,11 @@ def check_for_updates(command_name: str) -> None:
     truthy value (``1``, ``true``, ``yes``, ``on``) disables both the
     PyPI poll and the banner. See ``_check_disabled`` for the full list.
     """
-    if command_name not in _CHECK_COMMANDS:
-        return
-    if _check_disabled():
-        return
     try:
+        if command_name not in _CHECK_COMMANDS:
+            return
+        if _check_disabled():
+            return
         _do_check()
     except Exception:
         pass

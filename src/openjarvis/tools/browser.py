@@ -101,6 +101,24 @@ class BrowserNavigateTool(BaseTool):
         if wait_for not in ("load", "domcontentloaded", "networkidle"):
             wait_for = "load"
 
+        # Check exclusive source restriction
+        import os
+        if os.environ.get("OPENJARVIS_EXCLUSIVE_SOURCE", "").strip().lower() in (
+            "thedeepview",
+            "deep_view",
+            "the_deep_view",
+        ):
+            from openjarvis.tools.deep_view import is_deep_view_origin
+            if not is_deep_view_origin(url):
+                return ToolResult(
+                    tool_name="browser_navigate",
+                    content=(
+                        "Security Policy Violation: Web research is strictly confined to "
+                        "The Deep View (https://www.thedeepview.com). Off-domain browsing is blocked."
+                    ),
+                    success=False,
+                )
+
         # SSRF check — never skipped. check_ssrf falls back to a pure-Python
         # implementation when the Rust backend is unavailable, so an
         # uncompiled extension must not silently disable SSRF protection.

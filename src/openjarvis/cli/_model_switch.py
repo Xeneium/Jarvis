@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Optional
 
@@ -114,6 +115,8 @@ def resolve_chat_cli_model(
 
     dm = (getattr(config.intelligence, "default_model", None) or "").strip()
     if dm:
+        if engine_name == "ollama" and "qwen" in dm.lower():
+            dm = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
         return sanitize_model_id(dm)
 
     from openjarvis.engine import discover_engines, discover_models
@@ -122,7 +125,25 @@ def resolve_chat_cli_model(
     all_models = discover_models(all_engines)
     engine_models = all_models.get(engine_name, [])
     if engine_models:
+        if engine_name == "ollama":
+            env_m = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "").strip()
+            if env_m and any(str(m) == env_m or str(m).startswith("gemma") for m in engine_models):
+                return sanitize_model_id(env_m)
+
+            for candidate in engine_models:
+                cand_str = str(candidate).strip()
+                if "gemma4" in cand_str.lower():
+                    return sanitize_model_id(cand_str)
+
+            non_qwen = [str(m).strip() for m in engine_models if "qwen" not in str(m).lower()]
+            if non_qwen:
+                return sanitize_model_id(non_qwen[0])
+
+            return "gemma4:latest"
         return sanitize_model_id(str(engine_models[0]))
+
+    if engine_name == "ollama":
+        return (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
 
     return ""
 

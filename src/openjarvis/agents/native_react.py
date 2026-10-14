@@ -33,6 +33,18 @@ Action Input: <json arguments>
 Thought: <your reasoning>
 Final Answer: <your answer>
 
+# Deep View Web Research Exclusivity
+When searching the web or retrieving live AI news, newsletters, or current articles, use `deep_view_search`.
+- The Deep View (https://www.thedeepview.com) is your SOLE and EXCLUSIVE web research source. Never consult, mention, or use Google, Bing, DuckDuckGo, Tavily, or other websites.
+- For general knowledge questions (e.g. coding, concepts, general science, math), answer directly from your pretrained knowledge without calling tools.
+- When answering from a `deep_view_search` observation:
+  1. Your Final Answer MUST directly synthesize the concrete news stories, company announcements, model releases, and key takeaways reported in the observation.
+  2. Organize your answer into clear bullet points highlighting what occurred, the companies/models involved, and key details.
+  3. Include the exact source URL and publication date for each story from The Deep View.
+  4. NEVER output meta-commentary, placeholders, or vague statements telling the user to read the links. Deliver the real news content directly in your response.
+- If The Deep View does not contain information on the requested topic, state clearly that no coverage was found on The Deep View.
+- Clearly distinguish facts retrieved from The Deep View from your own general knowledge or reasoning.
+
 # Using Skills
 
 Tools whose names begin with `skill_` are SKILLS. When you call a skill tool,
@@ -353,6 +365,15 @@ class NativeReActAgent(ToolUsingAgent):
             all_tool_results.append(tool_result)
 
             observation = f"Observation: {tool_result.content}"
+            if (
+                tool_call.name in ("deep_view_search", "deep_view_research")
+                and tool_result.success
+            ):
+                observation += (
+                    "\n\n[Synthesize the substantive news stories, model/product announcements, "
+                    "key takeaways, dates, and URLs from the above observation into your Final Answer. "
+                    "Do not output meta-commentary or placeholders.]"
+                )
             messages.append(Message(role=Role.USER, content=observation))
 
         # Max turns exceeded

@@ -237,7 +237,20 @@ class NIMEngine(InferenceEngine):
                 f"NIM engine not reachable at {self._host}"
             ) from exc
 
+    @property
+    def _is_nvidia_hosted(self) -> bool:
+        """True if pointing to the public NVIDIA-hosted endpoint requiring an API key."""
+        return "nvidia.com" in self._host.lower()
+
+    def can_serve(self, model: str) -> bool:
+        """Hosted NVIDIA NIM endpoints require an API key to serve completions."""
+        if self._is_nvidia_hosted and not self._api_key:
+            return False
+        return True
+
     def list_models(self) -> List[str]:
+        if self._is_nvidia_hosted and not self._api_key:
+            return []
         try:
             resp = self._client.get(
                 f"{self._api_prefix}/models",
@@ -255,6 +268,8 @@ class NIMEngine(InferenceEngine):
         return [m["id"] for m in data.get("data", [])]
 
     def health(self) -> bool:
+        if self._is_nvidia_hosted and not self._api_key:
+            return False
         try:
             resp = self._client.get(
                 f"{self._api_prefix}/health/ready",

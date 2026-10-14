@@ -20,7 +20,11 @@ def secure_mkdir(path: Path, mode: int = 0o700) -> Path:
     target directory (even if it already exists).
     """
     path.mkdir(parents=True, exist_ok=True)
-    os.chmod(path, mode)
+    if os.name != "nt":
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
     return path
 
 
@@ -33,7 +37,11 @@ def secure_create(path: Path, mode: int = 0o600) -> Path:
     secure_mkdir(path.parent, mode=0o700)
     if not path.exists():
         path.touch()
-    os.chmod(path, mode)
+    if os.name != "nt":
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
     return path
 
 
@@ -66,7 +74,11 @@ def secure_write_text(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
-        os.chmod(path, mode)
+        if os.name != "nt":
+            try:
+                os.chmod(path, mode)
+            except OSError:
+                pass
     except Exception:
         try:
             os.close(fd)

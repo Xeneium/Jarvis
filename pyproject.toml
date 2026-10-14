@@ -292,6 +292,8 @@ select = ["E", "F", "I", "W"]
 # research_loop.py carries long prompt strings too (documented in CLAUDE.md);
 # the ignore was missing here.
 "src/openjarvis/agents/research_loop.py" = ["E501"]
+"src/openjarvis/agents/native_react.py" = ["E501"]
+"src/openjarvis/tools/deep_view.py" = ["E501"]
 
 [dependency-groups]
 dev = [

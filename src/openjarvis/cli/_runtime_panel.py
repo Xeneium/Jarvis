@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 MAX_NUM_CTX = 200_000
 MAX_NUM_GPU_LAYERS = 999
+DEFAULT_NUM_CTX = 16_384
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +159,7 @@ def runtime_cli_options(command: Any) -> Any:
 
 
 __all__ = [
+    "DEFAULT_NUM_CTX",
     "MAX_NUM_CTX",
     "MAX_NUM_GPU_LAYERS",
     "ChatRuntimeOptions",

@@ -2057,7 +2057,10 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
         Explicit config file. If not set, uses ``OPENJARVIS_CONFIG`` when set,
         otherwise ``~/.openjarvis/config.toml``.
     """
-    _ensure_config_dir()
+    try:
+        _ensure_config_dir()
+    except OSError:
+        pass
     hw = detect_hardware()
     cfg = JarvisConfig(hardware=hw)
     cfg.engine.default = recommend_engine(hw)
@@ -2069,12 +2072,21 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
     else:
         config_path = get_config_path()
     cfg._config_dir = config_path.parent
-    if config_path.exists():
-        with open(config_path, "rb") as fh:
-            data = tomllib.load(fh)
+    has_config = False
+    try:
+        has_config = config_path.exists()
+    except OSError:
+        has_config = False
 
-        # Run backward-compat migrations before applying
-        _migrate_toml_data(data, cfg)
+    if has_config:
+        try:
+            with open(config_path, "rb") as fh:
+                data = tomllib.load(fh)
+
+            # Run backward-compat migrations before applying
+            _migrate_toml_data(data, cfg)
+        except OSError:
+            data = None
 
         # All top-level sections — recursive _apply_toml_section handles
         # nested sub-configs (engine.ollama, learning.routing, channel.*, etc.)
@@ -2137,7 +2149,7 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
         cfg.mining = _parse_mining_section(data)
 
     # Apply profile even without a config file (in case defaults set one)
-    if not config_path.exists() and cfg.security.profile:
+    if not has_config and cfg.security.profile:
         apply_security_profile(cfg.security, cfg.server)
 
     return cfg

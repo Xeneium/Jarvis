@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from openjarvis.cli._runtime_panel import (
+    DEFAULT_NUM_CTX,
     MAX_NUM_CTX,
     ChatRuntimeOptions,
     _parse_int,
@@ -29,6 +30,10 @@ def test_runtime_summary_ollama() -> None:
 
 def test_max_num_ctx_constant() -> None:
     assert MAX_NUM_CTX == 200_000
+
+
+def test_default_num_ctx_constant() -> None:
+    assert DEFAULT_NUM_CTX == 16_384
 
 
 def test_zero_ctx_treated_as_default() -> None:

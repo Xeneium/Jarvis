@@ -100,6 +100,23 @@ class HttpRequestTool(BaseTool):
                 success=False,
             )
 
+        # Check exclusive source restriction
+        if os.environ.get("OPENJARVIS_EXCLUSIVE_SOURCE", "").strip().lower() in (
+            "thedeepview",
+            "deep_view",
+            "the_deep_view",
+        ):
+            from openjarvis.tools.deep_view import is_deep_view_origin
+            if not is_deep_view_origin(url):
+                return ToolResult(
+                    tool_name="http_request",
+                    content=(
+                        "Security Policy Violation: Web research is strictly confined to "
+                        "The Deep View (https://www.thedeepview.com). Off-domain HTTP requests are blocked."
+                    ),
+                    success=False,
+                )
+
         # SSRF protection check
         ssrf_error = check_ssrf(url)
         if ssrf_error:
