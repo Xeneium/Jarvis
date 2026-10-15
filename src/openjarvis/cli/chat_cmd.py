@@ -138,6 +138,16 @@ def chat(
     )
 
     resolved = get_engine(config, target_engine_key)
+    if resolved is None and target_engine_key == "groq":
+        console.print(
+            "[yellow]⚡ Groq API is not reachable or offline. Falling back to local Ollama (gemma4:latest)...[/yellow]"
+        )
+        target_engine_key = "ollama"
+        resolved = get_engine(config, "ollama")
+        if not model_name or "gpt" in str(model_name).lower():
+            model_name = os.environ.get("OLLAMA_MODEL") or "gemma4:latest"
+        num_ctx = 16384
+
     if resolved is None and target_engine_key == "ollama":
         console.print("[bold red]Ollama local inference engine is not reachable at http://localhost:11434[/bold red]")
         console.print(
@@ -183,8 +193,10 @@ def chat(
             cli_model=model_name,
             chat_variant="chat",
         )
-    if engine_name == "ollama" and model and "qwen" in model.lower():
+    if engine_name == "ollama" and model and ("qwen" in model.lower() or "gpt" in model.lower()):
         model = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
+    elif engine_name == "groq" and model and "gemma" in model.lower():
+        model = (os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b").strip()
     if not model:
         console.print("[red]No model available.[/red]")
         sys.exit(1)
@@ -201,10 +213,9 @@ def chat(
         "the_deep_view",
     )
 
-    if engine_name != "ollama" and (num_ctx is not None or num_gpu is not None):
-        raise click.UsageError(
-            "--num-ctx and --num-gpu are supported only with --engine ollama"
-        )
+    if engine_name != "ollama":
+        num_ctx = None
+        num_gpu = None
 
     # Resolve default num_ctx and num_gpu from environment/defaults if omitted
     if engine_name == "ollama":

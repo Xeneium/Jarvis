@@ -115,8 +115,10 @@ def resolve_chat_cli_model(
 
     dm = (getattr(config.intelligence, "default_model", None) or "").strip()
     if dm:
-        if engine_name == "ollama" and "qwen" in dm.lower():
+        if engine_name == "ollama" and ("qwen" in dm.lower() or "gpt" in dm.lower()):
             dm = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
+        elif engine_name == "groq" and "gemma" in dm.lower():
+            dm = (os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b").strip()
         return sanitize_model_id(dm)
 
     from openjarvis.engine import discover_engines, discover_models
@@ -140,8 +142,15 @@ def resolve_chat_cli_model(
                 return sanitize_model_id(non_qwen[0])
 
             return "gemma4:latest"
+        elif engine_name == "groq":
+            env_gm = (os.environ.get("GROQ_MODEL") or "").strip()
+            if env_gm and any(str(m) == env_gm for m in engine_models):
+                return sanitize_model_id(env_gm)
+            return sanitize_model_id(str(engine_models[0]))
         return sanitize_model_id(str(engine_models[0]))
 
+    if engine_name == "groq":
+        return (os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b").strip()
     if engine_name == "ollama":
         return (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
 

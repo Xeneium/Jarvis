@@ -3,12 +3,12 @@
 <img alt="JARVIS AI Hero Banner" src="assets/jarvis_hero_banner.png" width="100%" style="border-radius: 12px; box-shadow: 0 8px 30px rgba(0, 240, 255, 0.15);" />
 
 # ⚡ JARVIS: Autonomous Personal AI Assistant
-### *Private On-Device Intelligence &bull; Exclusive Real-Time AI News via The Deep View*
+### *Ultra-Fast Groq Online Inference &bull; Local Ollama Fallback &bull; Exclusive Real-Time AI News via The Deep View*
 
 [![Python Version](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Local LLM Engine](https://img.shields.io/badge/Ollama-Local%20Inference-000000?style=for-the-badge&logo=ollama&logoColor=white)](https://ollama.com)
-[![Model](https://img.shields.io/badge/Model-Gemma%204-FF6F00?style=for-the-badge&logo=google&logoColor=white)](https://ollama.com/library/gemma4)
-[![Context Window](https://img.shields.io/badge/Context-16K%20(16%2C384)-6f42c1?style=for-the-badge)](https://github.com/Xeneium/Jarvis)
+[![Primary Engine](https://img.shields.io/badge/Online%20Engine-Groq%20LPU-f55036?style=for-the-badge&logo=groq&logoColor=white)](https://groq.com)
+[![Offline Fallback](https://img.shields.io/badge/Offline%20Fallback-Ollama%20(Gemma%204)-000000?style=for-the-badge&logo=ollama&logoColor=white)](https://ollama.com)
+[![Context Window](https://img.shields.io/badge/Local%20Context-16K%20(16%2C384)-6f42c1?style=for-the-badge)](https://github.com/Xeneium/Jarvis)
 [![Web Research](https://img.shields.io/badge/News%20Source-The%20Deep%20View%20Only-00f0ff?style=for-the-badge&logo=rss&logoColor=black)](https://www.thedeepview.com/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-2ea44f?style=for-the-badge)](LICENSE)
 
@@ -28,7 +28,11 @@
 
 ## 🌟 Executive Overview
 
-**JARVIS** is a production-grade, local-first autonomous personal AI assistant engineered for privacy, speed, and zero hallucination in real-time AI developments. Built to run entirely on personal hardware, Jarvis decouples everyday reasoning and web retrieval from monolithic, closed-source cloud providers.
+**JARVIS** is a production-grade autonomous personal AI assistant engineered for extreme inference speed, high-capacity reasoning, and zero hallucination in contemporary AI developments. 
+
+Jarvis features an intelligent **Hybrid Inference Engine**:
+- **⚡ Primary Online Mode (Groq LPU):** When online and configured with a `GROQ_API_KEY`, Jarvis routes all inference through Groq's high-throughput LPU cloud engine for near-instant responses.
+- **🛡️ Local Offline Fallback (Ollama):** When offline, during network disruptions, or if Groq is unreachable, Jarvis seamlessly falls back to your local Ollama runtime powered by **Gemma 4** (`gemma4:latest`) with an optimized **16K context window** (16,384 tokens).
 
 Unlike traditional AI wrappers that indiscriminately search the web—pulling in SEO spam, advertisement farms, and unverified blogs—**Jarvis restricts all web research exclusively to [The Deep View](https://www.thedeepview.com/)**, the premier authoritative curation of artificial intelligence breakthroughs, industry benchmarks, and frontier developments.
 
@@ -41,9 +45,9 @@ Unlike traditional AI wrappers that indiscriminately search the web—pulling in
               ┌────────────────────┴────────────────────┐
               ▼                                         ▼
    ┌───────────────────────┐               ┌──────────────────────────┐
-   │  100% Local Inference  │               │    Verified Intelligence │
-   │   Ollama / Gemma 4    │               │ Exclusive The Deep View  │
-   │      16K Context      │               │   Real-Time Newsletter   │
+   │   HYBRID INFERENCE    │               │    Verified Intelligence │
+   │  Online: Groq LPU     │               │ Exclusive The Deep View  │
+   │  Offline: Ollama 16K  │               │   Real-Time Newsletter   │
    └───────────────────────┘               └──────────────────────────┘
 ```
 
@@ -53,12 +57,13 @@ Unlike traditional AI wrappers that indiscriminately search the web—pulling in
 
 | Capability | Specification | Architectural Value |
 | :--- | :--- | :--- |
-| **🧠 Local LLM Execution** | `Ollama` (`gemma4:latest`) | Zero data leakage; fully offline reasoning with zero cloud telemetry. |
-| **⚡ 16K Optimized Context** | `16,384 tokens` | High-efficiency attention window tuned for deep multi-turn ReAct cycles and prompt responsiveness. |
+| **⚡ Primary Online Inference** | `Groq LPU` (`openai/gpt-oss-120b`) | Ultra-fast token generation and deep reasoning via Groq's high-throughput LPU cloud API. |
+| **🦙 Automatic Local Fallback** | `Ollama` (`gemma4:latest`) | Seamless, zero-touch fallback to local hardware when offline or experiencing network drops. |
+| **🧠 16K Local Context Window** | `16,384 tokens` | High-efficiency attention window tuned for deep multi-turn ReAct cycles and prompt responsiveness. |
 | **🌐 Exclusive Retrieval** | `thedeepview.com` Only | Pinned domain whitelist. No fallback to Google, Bing, or generic web indices. |
 | **🔄 Native ReAct Engine** | Thought-Action-Observation | Dynamic tool calling with multi-hop retrieval and contextual self-correction. |
 | **🛡️ SSRF & Network Guard** | DNS Pinning & URL Parsing | Strict defense-in-depth preventing local host probing or unverified URL traversal. |
-| **💻 Zero-Config UX** | `python main.py` | Automatic Ollama connectivity check, model fallback protection, and immediate `You>` prompt. |
+| **💻 Zero-Config UX** | `python main.py` | Auto-detects online connectivity and Groq credentials with instantaneous console initialization. |
 
 ---
 
@@ -88,9 +93,9 @@ flowchart TD
         PARSER["🔍 Tool Call Dispatcher\n& Observation Synthesizer"]
     end
 
-    subgraph MODEL[" 🤖 Tier 3: Local Inference Engine "]
-        OLLAMA["🦙 Ollama Runtime Daemon\n(http://localhost:11434)"]
-        GEMMA["✨ Gemma 4:latest\n(Fast High-Fidelity Reasoning)"]
+    subgraph MODEL[" 🤖 Tier 3: Hybrid Inference Engine Layer "]
+        GROQ["⚡ Groq Cloud LPU\n(api.groq.com / Primary Online)"]
+        OLLAMA["🦙 Ollama Local Daemon\n(gemma4:latest / 16K Local Fallback)"]
     end
 
     subgraph TOOLS[" 🛠️ Tier 4: Agent Tool Registry "]
@@ -110,8 +115,8 @@ flowchart TD
     PROMPT --> AGENT
     AGENT <--> CTX
     AGENT <--> PARSER
+    AGENT <--> GROQ
     AGENT <--> OLLAMA
-    OLLAMA <--> GEMMA
 
     PARSER --> REG
     PARSER --> DEEP_TOOL
@@ -125,7 +130,7 @@ flowchart TD
 
     class CLI,PROMPT clientLayer;
     class AGENT,CTX,PARSER agentLayer;
-    class OLLAMA,GEMMA modelLayer;
+    class GROQ,OLLAMA modelLayer;
     class REG,DEEP_TOOL toolsLayer;
     class GUARD,SITEMAP,PARSER_HTML,SOURCE retrievalLayer;
 ```
@@ -255,9 +260,11 @@ cp .env.example .env
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint for the local Ollama daemon. |
-| `OLLAMA_MODEL` | `gemma4:latest` | Target local model. Preserved by default. |
-| `OLLAMA_NUM_CTX` | `16384` | Sets context window length to 16K tokens. |
+| `GROQ_API_KEY` | *(from `.env`)* | API key for ultra-fast online inference via Groq LPU cloud. |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Online Groq model (e.g. `openai/gpt-oss-120b`, `qwen/qwen3.8-27b`). |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint for the local Ollama daemon (local fallback). |
+| `OLLAMA_MODEL` | `gemma4:latest` | Target local model for offline fallback. Preserved by default. |
+| `JARVIS_NUM_CTX` | `16384` | Sets context window length to 16K tokens for local Ollama. |
 | `DEEP_VIEW_MAX_RESULTS` | `5` | Maximum number of newsletter articles fetched per search. |
 | `DEEP_VIEW_REQUEST_TIMEOUT` | `15` | Request timeout in seconds for deepview queries. |
 

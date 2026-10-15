@@ -3,13 +3,18 @@
 Allows launching OpenJarvis directly via:
     python main.py [COMMAND] [ARGS]...
 
-Delegates cleanly to the canonical OpenJarvis CLI runtime.
+Supports Groq as the primary online inference engine with automatic
+local fallback to Ollama (gemma4:latest, 16K context window).
+Exclusive web research is locked to The Deep View (https://www.thedeepview.com).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -46,7 +51,7 @@ def _check_virtual_env() -> None:
 
 
 def _load_env_file(repo_root: Path) -> None:
-    """Load key-value pairs from .env into os.environ if not already set."""
+    """Load key-value pairs from .env into os.environ (overwrites existing values)."""
     env_file = repo_root / ".env"
     if not env_file.is_file():
         return
@@ -64,10 +69,56 @@ def _load_env_file(repo_root: Path) -> None:
                         val.startswith("'") and val.endswith("'")
                     ):
                         val = val[1:-1]
-                    if key and val and key not in os.environ:
+                    if key:
                         os.environ[key] = val
     except Exception:
         pass
+
+
+def _probe_groq_online(api_key: str | None) -> tuple[bool, str | None]:
+    """Test if Groq API is online, reachable, and authenticated."""
+    if not api_key or not api_key.strip():
+        return False, None
+    try:
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/models",
+            headers={
+                "Authorization": f"Bearer {api_key.strip()}",
+                "User-Agent": "OpenJarvis/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            if resp.status == 200:
+                payload = json.loads(resp.read().decode("utf-8"))
+                model_ids = [
+                    m["id"]
+                    for m in payload.get("data", [])
+                    if isinstance(m, dict) and "id" in m
+                ]
+                preferred = [
+                    "openai/gpt-oss-120b",
+                    "qwen/qwen3.8-27b",
+                    "openai/gpt-oss-20b",
+                    "llama-3.3-70b-versatile",
+                    "llama-3.1-8b-instant",
+                ]
+                selected = os.environ.get("GROQ_MODEL")
+                if not selected:
+                    for pref in preferred:
+                        if pref in model_ids:
+                            selected = pref
+                            break
+                if not selected and model_ids:
+                    chat_models = [
+                        m
+                        for m in model_ids
+                        if not m.startswith("whisper") and "guard" not in m.lower()
+                    ]
+                    selected = chat_models[0] if chat_models else model_ids[0]
+                return True, selected or "openai/gpt-oss-120b"
+    except Exception:
+        pass
+    return False, None
 
 
 def main() -> None:
@@ -78,16 +129,37 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parent
     _load_env_file(repo_root)
 
-    # Defaults for local Ollama + The Deep View exclusive operation
-    os.environ.setdefault("OPENJARVIS_DEFAULT_ENGINE", "ollama")
+    # Detect online Groq connectivity vs. local Ollama fallback
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    is_groq_online, groq_model = _probe_groq_online(groq_api_key)
+
+    if is_groq_online and groq_model:
+        os.environ["OPENJARVIS_DEFAULT_ENGINE"] = "groq"
+        os.environ["JARVIS_MODEL"] = groq_model
+        os.environ["GROQ_MODEL"] = groq_model
+        sys.stdout.write(
+            f"\n⚡ [Online Mode] Connected to Groq API. Engine: Groq | Model: {groq_model}\n"
+        )
+    else:
+        os.environ["OPENJARVIS_DEFAULT_ENGINE"] = "ollama"
+        os.environ["OLLAMA_MODEL"] = "gemma4:latest"
+        os.environ["JARVIS_MODEL"] = "gemma4:latest"
+        os.environ["JARVIS_NUM_CTX"] = "16384"
+        os.environ["JARVIS_NUM_GPU"] = "1"
+        if groq_api_key:
+            sys.stdout.write(
+                "\n⚡ [Offline / Local Fallback] Groq unreachable or offline. Falling back to local Ollama (gemma4:latest, 16K context).\n"
+            )
+        else:
+            sys.stdout.write(
+                "\n⚡ [Local Mode] Using local Ollama (gemma4:latest, 16K context).\n"
+            )
+
+    # Defaults for The Deep View exclusive web research
     os.environ.setdefault("OPENJARVIS_EXCLUSIVE_SOURCE", "thedeepview")
     os.environ.setdefault("OPENJARVIS_WEB_SEARCH_ENGINE", "deep_view")
     os.environ.setdefault("JARVIS_SKIP_MODEL_PICK", "1")
     os.environ.setdefault("JARVIS_SKIP_RUNTIME_PANEL", "1")
-    os.environ.setdefault("JARVIS_NUM_CTX", "16384")
-    os.environ.setdefault("JARVIS_NUM_GPU", "1")
-    os.environ.setdefault("OLLAMA_MODEL", "gemma4:latest")
-    os.environ.setdefault("JARVIS_MODEL", "gemma4:latest")
 
     # When invoked as bare `python main.py`, launch the interactive chat session
     if len(sys.argv) == 1:
