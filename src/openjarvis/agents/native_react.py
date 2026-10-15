@@ -33,14 +33,15 @@ Action Input: <json arguments>
 Thought: <your reasoning>
 Final Answer: <your answer>
 
-# Deep View Web Research Exclusivity
-When searching the web or retrieving live AI news, newsletters, or current articles, use `deep_view_search`.
+# Deep View Web Research Exclusivity & Real-Time News Policy
+- MANDATORY TOOL USAGE: You DO NOT possess real-time or current news in your pretraining weights. For ANY query asking about recent AI news, updates, announcements, developments, newsletters, or current events (such as "What is the latest news in AI?", "What are the recent updates in AI?"), you MUST FIRST invoke `deep_view_search` with action="search" (query="AI" or the relevant topic) or action="latest_newsletters".
+- DO NOT answer news queries from your memory. You MUST NEVER invent, guess, hallucinate, or fabricate articles, dates, or URLs. Every news article, date, and URL MUST originate from a real `deep_view_search` observation.
 - The Deep View (https://www.thedeepview.com) is your SOLE and EXCLUSIVE web research source. Never consult, mention, or use Google, Bing, DuckDuckGo, Tavily, or other websites.
-- For general knowledge questions (e.g. coding, concepts, general science, math), answer directly from your pretrained knowledge without calling tools.
+- ONLY answer directly without calling tools for general knowledge questions (e.g. coding concepts, mathematics, general science).
 - When answering from a `deep_view_search` observation:
   1. Your Final Answer MUST directly synthesize the concrete news stories, company announcements, model releases, and key takeaways reported in the observation.
   2. Organize your answer into clear bullet points highlighting what occurred, the companies/models involved, and key details.
-  3. Include the exact source URL and publication date for each story from The Deep View.
+  3. Include the exact source URL and publication date for each story from The Deep View observation.
   4. NEVER output meta-commentary, placeholders, or vague statements telling the user to read the links. Deliver the real news content directly in your response.
 - If The Deep View does not contain information on the requested topic, state clearly that no coverage was found on The Deep View.
 - Clearly distinguish facts retrieved from The Deep View from your own general knowledge or reasoning.
@@ -299,6 +300,12 @@ class NativeReActAgent(ToolUsingAgent):
             content = result.get("content", "")
             parsed = self._parse_response(content)
 
+            # Check if engine returned native tool_calls (or recovered failed_generation)
+            if not parsed.get("action") and result.get("tool_calls"):
+                raw_tc = result["tool_calls"][0]
+                parsed["action"] = raw_tc.get("name", "")
+                parsed["action_input"] = raw_tc.get("arguments", "{}")
+
             if parsed.get("parse_error"):
                 self._emit_turn_end(turns=turns)
                 return AgentResult(
@@ -326,16 +333,28 @@ class NativeReActAgent(ToolUsingAgent):
 
             # No action? Treat content as final answer
             if not parsed["action"]:
+                cleaned_content = content
+                thought_prefix = re.match(
+                    r"^Thought:\s*(.+?)\n\n+(.+)$", content, re.DOTALL | re.IGNORECASE
+                )
+                if thought_prefix:
+                    cleaned_content = thought_prefix.group(2).strip()
                 self._emit_turn_end(turns=turns)
                 msg_dicts = [_message_to_dict(m) for m in messages]
                 return AgentResult(
-                    content=content,
+                    content=cleaned_content,
                     tool_results=all_tool_results,
                     turns=turns,
                     metadata={**total_usage, "messages": msg_dicts},
                 )
 
             # Execute action
+            if not content or "Action:" not in content:
+                content = (
+                    f"Thought: I will search The Deep View for AI news.\n"
+                    f"Action: {parsed['action']}\n"
+                    f"Action Input: {parsed['action_input']}"
+                )
             messages.append(Message(role=Role.ASSISTANT, content=content))
 
             tool_call = ToolCall(

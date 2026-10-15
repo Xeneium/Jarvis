@@ -200,3 +200,85 @@ def test_resolve_chat_cli_model_ollama_fallback(monkeypatch):
     )
     assert resolved == "gemma4:latest"
 
+
+def test_groq_engine_recovers_failed_generation(monkeypatch):
+    """Verify GroqEngine recovers from HTTP 400 tool_use_failed with failed_generation."""
+    import json
+    import httpx
+    from openjarvis.core.types import Message, Role
+
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    engine = GroqEngine()
+
+    error_body = {
+        "error": {
+            "message": "Tool choice is none, but model called a tool",
+            "type": "invalid_request_error",
+            "code": "tool_use_failed",
+            "failed_generation": json.dumps({
+                "name": "deep_view_search",
+                "arguments": {"action": "search", "query": "AI", "limit": 5},
+            }),
+        }
+    }
+    mock_resp = httpx.Response(
+        status_code=400,
+        json=error_body,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+
+    with patch.object(engine._client, "post", return_value=mock_resp):
+        res = engine.generate(
+            [Message(role=Role.USER, content="What is the latest news in AI?")],
+            model="openai/gpt-oss-120b",
+        )
+        assert res["finish_reason"] == "tool_calls"
+        assert len(res["tool_calls"]) == 1
+        assert res["tool_calls"][0]["name"] == "deep_view_search"
+        assert "Action: deep_view_search" in res["content"]
+        assert "Action Input:" in res["content"]
+
+
+def test_native_react_agent_handles_recovered_tool_call():
+    """Verify NativeReActAgent uses recovered tool_calls when Action missing from content."""
+    from openjarvis.agents.native_react import NativeReActAgent
+    from openjarvis.tools.deep_view import TheDeepViewTool
+
+    mock_engine = MagicMock()
+    # Turn 1: returns recovered tool call
+    mock_engine.generate.side_effect = [
+        {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "groq_call_1",
+                    "name": "deep_view_search",
+                    "arguments": '{"action": "search", "query": "AI", "limit": 1}',
+                }
+            ],
+            "finish_reason": "tool_calls",
+            "usage": {},
+        },
+        # Turn 2: returns final answer
+        {
+            "content": "Final Answer: The latest news from The Deep View is GPT-6 launch.",
+            "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {},
+        },
+    ]
+
+    tool = TheDeepViewTool()
+    with patch.object(tool, "execute") as mock_exec:
+        from openjarvis.core.types import ToolResult
+        mock_exec.return_value = ToolResult(
+            tool_name="deep_view_search",
+            content="[Sample Story](https://www.thedeepview.com/article/1)",
+            success=True,
+        )
+        agent = NativeReActAgent(mock_engine, "openai/gpt-oss-120b", tools=[tool], max_turns=3)
+        res = agent.run("What is the latest news in AI?")
+        assert "The latest news from The Deep View is GPT-6 launch." in res.content
+        assert res.turns == 2
+        mock_exec.assert_called_once()
+

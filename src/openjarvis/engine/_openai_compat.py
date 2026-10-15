@@ -79,6 +79,58 @@ class _OpenAICompatibleEngine(AsyncHTTPEngineMixin, InferenceEngine):
     def _resolve_model_id(self, model: str) -> str:
         return resolve_model_id_for_engine(model, self.engine_id)
 
+    def _try_recover_failed_generation(
+        self, resp: httpx.Response, model: str
+    ) -> Dict[str, Any] | None:
+        """Recover Groq tool_use_failed errors carrying failed_generation payloads."""
+        try:
+            err_json = resp.json().get("error", {})
+            if (
+                err_json.get("code") == "tool_use_failed"
+                and "failed_generation" in err_json
+            ):
+                fg_raw = err_json["failed_generation"]
+                fg = json.loads(fg_raw) if isinstance(fg_raw, str) else fg_raw
+                tool_name = fg.get("name", "")
+                if not tool_name:
+                    return None
+                tool_args = fg.get("arguments", {})
+                args_str = (
+                    json.dumps(tool_args)
+                    if isinstance(tool_args, dict)
+                    else str(tool_args)
+                )
+                logger.info(
+                    "Recovered Groq failed_generation tool call %s(%s)",
+                    tool_name,
+                    args_str,
+                )
+                return {
+                    "content": (
+                        "Thought: I will search The Deep View for AI news.\n"
+                        f"Action: {tool_name}\n"
+                        f"Action Input: {args_str}"
+                    ),
+                    "tool_calls": [
+                        {
+                            "id": "groq_failed_gen_call",
+                            "name": tool_name,
+                            "arguments": args_str,
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "prompt_tokens_evaluated": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                    "model": model,
+                    "finish_reason": "tool_calls",
+                }
+        except Exception as exc:
+            logger.debug("Failed to recover failed_generation: %s", exc)
+        return None
+
     def generate(
         self,
         messages: Sequence[Message],
@@ -102,10 +154,18 @@ class _OpenAICompatibleEngine(AsyncHTTPEngineMixin, InferenceEngine):
         try:
             url = f"{self._api_prefix}/chat/completions"
             resp = self._client.post(url, json=payload)
-            if resp.status_code == 400 and "tools" in payload:
-                payload.pop("tools", None)
-                payload.pop("tool_choice", None)
-                resp = self._client.post(url, json=payload)
+            if resp.status_code == 400:
+                recovered = self._try_recover_failed_generation(resp, model)
+                if recovered is not None:
+                    return recovered
+                if "tools" in payload:
+                    payload.pop("tools", None)
+                    payload.pop("tool_choice", None)
+                    resp = self._client.post(url, json=payload)
+                    if resp.status_code == 400:
+                        recovered = self._try_recover_failed_generation(resp, model)
+                        if recovered is not None:
+                            return recovered
             resp.raise_for_status()
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise EngineConnectionError(
@@ -266,6 +326,44 @@ class _OpenAICompatibleEngine(AsyncHTTPEngineMixin, InferenceEngine):
                 # a silent EMPTY stream instead of a clean engine error.
                 if not resp.is_success:
                     await resp.aread()
+                    try:
+                        err_json = json.loads(resp.text).get("error", {})
+                        if (
+                            err_json.get("code") == "tool_use_failed"
+                            and "failed_generation" in err_json
+                        ):
+                            fg_raw = err_json["failed_generation"]
+                            fg = json.loads(fg_raw) if isinstance(fg_raw, str) else fg_raw
+                            tool_name = fg.get("name", "")
+                            if tool_name:
+                                tool_args = fg.get("arguments", {})
+                                args_str = (
+                                    json.dumps(tool_args)
+                                    if isinstance(tool_args, dict)
+                                    else str(tool_args)
+                                )
+                                yield StreamChunk(
+                                    content=(
+                                        "Thought: I will search The Deep View for AI news.\n"
+                                        f"Action: {tool_name}\n"
+                                        f"Action Input: {args_str}"
+                                    ),
+                                    tool_calls=[
+                                        {
+                                            "index": 0,
+                                            "id": "groq_failed_gen_call",
+                                            "type": "function",
+                                            "function": {
+                                                "name": tool_name,
+                                                "arguments": args_str,
+                                            },
+                                        }
+                                    ],
+                                    finish_reason="tool_calls",
+                                )
+                                return
+                    except Exception:
+                        pass
                     self._raise_stream_http_error(resp.status_code, resp.text)
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
