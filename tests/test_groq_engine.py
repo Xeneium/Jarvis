@@ -94,7 +94,23 @@ def test_groq_engine_can_serve(monkeypatch):
     engine = GroqEngine()
     assert engine.can_serve("openai/gpt-oss-120b") is True
     assert engine.can_serve("qwen/qwen3.8-27b") is True
+    assert engine.can_serve("llama-3.3-70b-versatile") is True
     assert engine.can_serve("gemma4:latest") is False
+    assert engine.can_serve("qwen3-vl:4b") is False
+    assert engine.can_serve("bge-m3:latest") is False
+    assert engine.can_serve("any-model:tag") is False
+
+
+def test_groq_engine_resolve_model_id_safety(monkeypatch):
+    """Verify _resolve_model_id safely maps invalid or local Ollama tags to Groq model."""
+    monkeypatch.setenv("GROQ_API_KEY", "test-dummy-groq-key")
+    monkeypatch.setenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    engine = GroqEngine()
+
+    assert engine._resolve_model_id("openai/gpt-oss-120b") == "openai/gpt-oss-120b"
+    # Local Ollama tag must never be dispatched to Groq
+    assert engine._resolve_model_id("qwen3-vl:4b") == "openai/gpt-oss-120b"
+    assert engine._resolve_model_id("gemma4:latest") == "openai/gpt-oss-120b"
 
 
 def test_probe_groq_online_success():
@@ -108,6 +124,20 @@ def test_probe_groq_online_success():
         online, model = _probe_groq_online("gsk_valid_key")
         assert online is True
         assert model == "openai/gpt-oss-120b"
+
+
+def test_probe_groq_online_custom_model(monkeypatch):
+    """Verify _probe_groq_online respects GROQ_MODEL in .env if available."""
+    monkeypatch.setenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.read.return_value = b'{"data": [{"id": "openai/gpt-oss-120b"}, {"id": "qwen/qwen3.8-27b"}]}'
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        online, model = _probe_groq_online("gsk_valid_key")
+        assert online is True
+        assert model == "qwen/qwen3.8-27b"
 
 
 def test_probe_groq_online_failure():
@@ -138,6 +168,23 @@ def test_resolve_chat_cli_model_groq(monkeypatch):
         assert resolved in ("openai/gpt-oss-120b", "qwen/qwen3.8-27b")
 
 
+def test_resolve_chat_cli_model_groq_rejects_stale_qwen3_vl(monkeypatch):
+    """Verify resolve_chat_cli_model will never return qwen3-vl:4b for groq even if set in config."""
+    config = JarvisConfig()
+    config.intelligence.default_model = "qwen3-vl:4b"
+    engine = GroqEngine(api_key="gsk_test123")
+    monkeypatch.setenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    resolved = resolve_chat_cli_model(
+        console=MagicMock(),
+        config=config,
+        engine=engine,
+        engine_name="groq",
+        cli_model=None,
+        chat_variant="chat",
+    )
+    assert resolved == "openai/gpt-oss-120b"
+
+
 def test_resolve_chat_cli_model_ollama_fallback(monkeypatch):
     """Verify resolve_chat_cli_model preserves gemma4:latest when engine is ollama."""
     config = JarvisConfig()
@@ -152,3 +199,4 @@ def test_resolve_chat_cli_model_ollama_fallback(monkeypatch):
         chat_variant="chat",
     )
     assert resolved == "gemma4:latest"
+

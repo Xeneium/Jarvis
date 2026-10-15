@@ -91,13 +91,34 @@ class GroqEngine(_OpenAICompatibleEngine):
             return []
 
     def can_serve(self, model: str) -> bool:
-        """Check if this engine can serve the given model."""
-        if not self._api_key:
+        """Check if this engine can serve the given model.
+
+        Rejects Ollama local tags (containing colons or local identifiers like
+        'qwen3-vl:4b', 'gemma4:latest'), non-chat models, and models not served by Groq.
+        """
+        if not self._api_key or not model or not isinstance(model, str):
             return False
-        # If model is an Ollama tag, Groq cannot serve it
-        if "gemma4" in model.lower():
+        clean = model.strip().lower()
+        # Reject local Ollama tags like "qwen3-vl:4b", "gemma4:latest", "model:tag"
+        if ":" in clean:
             return False
-        return True
+        if "gemma" in clean or "qwen3-vl" in clean or "bge-m3" in clean:
+            return False
+        # Known supported Groq model IDs or prefixes
+        if any(pref in clean for pref in ("openai/", "qwen/", "llama", "mixtral", "allam")):
+            return True
+        if model in DEFAULT_GROQ_MODELS:
+            return True
+        return False
+
+    def _resolve_model_id(self, model: str) -> str:
+        """Resolve model ID, ensuring only valid Groq models are dispatched."""
+        configured = (os.environ.get("GROQ_MODEL") or "").strip()
+        if model and self.can_serve(model):
+            return model
+        if configured and self.can_serve(configured):
+            return configured
+        return configured or DEFAULT_GROQ_MODELS[0]
 
 
 __all__ = ["GroqEngine", "DEFAULT_GROQ_MODELS"]

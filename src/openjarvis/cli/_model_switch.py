@@ -107,18 +107,32 @@ def resolve_chat_cli_model(
     """
     explicit = sanitize_model_id(cli_model or "")
     if explicit and explicit.lower() != SMART_MODEL_TOKEN:
+        if engine_name == "groq" and hasattr(engine, "can_serve") and not engine.can_serve(explicit):
+            return sanitize_model_id(os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b")
+        if engine_name == "ollama" and ("qwen" in explicit.lower() or "gpt" in explicit.lower()):
+            return sanitize_model_id(os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest")
         return explicit
 
     preset = variant_preset_model(config, chat_variant)
     if preset:
-        return sanitize_model_id(preset)
+        if engine_name == "groq" and hasattr(engine, "can_serve") and not engine.can_serve(preset):
+            preset = ""
+        elif engine_name == "ollama" and ("qwen" in preset.lower() or "gpt" in preset.lower()):
+            preset = ""
+        if preset:
+            return sanitize_model_id(preset)
 
     dm = (getattr(config.intelligence, "default_model", None) or "").strip()
     if dm:
-        if engine_name == "ollama" and ("qwen" in dm.lower() or "gpt" in dm.lower()):
-            dm = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
-        elif engine_name == "groq" and "gemma" in dm.lower():
-            dm = (os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b").strip()
+        if engine_name == "ollama":
+            if "qwen" in dm.lower() or "gpt" in dm.lower() or (hasattr(engine, "can_serve") and not engine.can_serve(dm)):
+                dm = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
+        elif engine_name == "groq":
+            groq_env = (os.environ.get("GROQ_MODEL") or "").strip()
+            if groq_env and (not hasattr(engine, "can_serve") or engine.can_serve(groq_env)):
+                dm = groq_env
+            elif hasattr(engine, "can_serve") and not engine.can_serve(dm):
+                dm = groq_env or "openai/gpt-oss-120b"
         return sanitize_model_id(dm)
 
     from openjarvis.engine import discover_engines, discover_models
@@ -144,9 +158,12 @@ def resolve_chat_cli_model(
             return "gemma4:latest"
         elif engine_name == "groq":
             env_gm = (os.environ.get("GROQ_MODEL") or "").strip()
-            if env_gm and any(str(m) == env_gm for m in engine_models):
+            if env_gm and (not hasattr(engine, "can_serve") or engine.can_serve(env_gm)):
                 return sanitize_model_id(env_gm)
-            return sanitize_model_id(str(engine_models[0]))
+            valid = [str(m).strip() for m in engine_models if not hasattr(engine, "can_serve") or engine.can_serve(str(m))]
+            if valid:
+                return sanitize_model_id(valid[0])
+            return "openai/gpt-oss-120b"
         return sanitize_model_id(str(engine_models[0]))
 
     if engine_name == "groq":

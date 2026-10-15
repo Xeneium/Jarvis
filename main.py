@@ -102,7 +102,9 @@ def _probe_groq_online(api_key: str | None) -> tuple[bool, str | None]:
                     "llama-3.3-70b-versatile",
                     "llama-3.1-8b-instant",
                 ]
-                selected = os.environ.get("GROQ_MODEL")
+                selected = (os.environ.get("GROQ_MODEL") or "").strip()
+                if selected and selected not in model_ids:
+                    selected = ""
                 if not selected:
                     for pref in preferred:
                         if pref in model_ids:

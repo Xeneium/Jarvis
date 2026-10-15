@@ -193,10 +193,15 @@ def chat(
             cli_model=model_name,
             chat_variant="chat",
         )
-    if engine_name == "ollama" and model and ("qwen" in model.lower() or "gpt" in model.lower()):
-        model = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
-    elif engine_name == "groq" and model and "gemma" in model.lower():
-        model = (os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b").strip()
+    if engine_name == "ollama":
+        if not model or "qwen" in model.lower() or "gpt" in model.lower() or (hasattr(engine, "can_serve") and not engine.can_serve(model)):
+            model = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
+    elif engine_name == "groq":
+        groq_target = (os.environ.get("GROQ_MODEL") or "").strip()
+        if groq_target and (not hasattr(engine, "can_serve") or engine.can_serve(groq_target)):
+            model = groq_target
+        elif not model or (hasattr(engine, "can_serve") and not engine.can_serve(model)):
+            model = groq_target or "openai/gpt-oss-120b"
     if not model:
         console.print("[red]No model available.[/red]")
         sys.exit(1)

@@ -2152,6 +2152,20 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
     if not has_config and cfg.security.profile:
         apply_security_profile(cfg.security, cfg.server)
 
+    # Ensure OPENJARVIS_DEFAULT_ENGINE and model env variables are honored by loaded config
+    env_engine = (os.environ.get("OPENJARVIS_DEFAULT_ENGINE") or "").strip()
+    if env_engine:
+        cfg.engine.default = env_engine
+
+    if cfg.engine.default == "groq":
+        groq_m = (os.environ.get("GROQ_MODEL") or os.environ.get("JARVIS_MODEL") or "openai/gpt-oss-120b").strip()
+        if not cfg.intelligence.default_model or ":" in cfg.intelligence.default_model or "gemma" in cfg.intelligence.default_model:
+            cfg.intelligence.default_model = groq_m
+    elif cfg.engine.default == "ollama":
+        ollama_m = (os.environ.get("OLLAMA_MODEL") or os.environ.get("JARVIS_MODEL") or "gemma4:latest").strip()
+        if not cfg.intelligence.default_model or "qwen" in cfg.intelligence.default_model or "gpt" in cfg.intelligence.default_model:
+            cfg.intelligence.default_model = ollama_m
+
     return cfg
 
 
