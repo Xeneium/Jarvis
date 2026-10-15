@@ -153,8 +153,17 @@ gitleaks.report
 *.key
 *.p12
 *.pfx
+*.crt
+*.cer
+*.der
 id_rsa
 id_ed25519
+
+# Package manager debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # Antigravity & AI assistant artifacts
 .antigravity/
@@ -165,3 +174,4 @@ Desktop.ini
 ehthumbs.db
 *.dmp
 *.crash
+*.stackdump
