@@ -17,7 +17,7 @@ import logging
 import re
 import socket
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Optional, Tuple
@@ -27,6 +27,13 @@ import httpx
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
+from openjarvis.tools.temporal import (
+    CanonicalArticleRecord,
+    deduplicate_articles,
+    filter_and_rank_by_freshness,
+    is_within_temporal_window,
+    parse_iso_or_rfc_datetime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +64,10 @@ ALLOWED_CONTENT_TYPES = frozenset(
 )
 
 SITEMAP_URL = "https://www.thedeepview.com/sitemap.xml"
+FEED_URL = "https://www.thedeepview.com/feed.xml"
+NEWSLETTER_ARCHIVE_URL = "https://www.thedeepview.com/newsletter"
+ARTICLES_ARCHIVE_URL = "https://www.thedeepview.com/articles"
+
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OpenJarvis-DeepView/1.0"
@@ -353,20 +364,46 @@ class DeepViewArticle:
     author: str
     content: str
     summary: str
+    published_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    retrieved_at: Optional[datetime] = None
+    date_status: str = "unverified"
+    raw_updated_date: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "url": self.url,
             "title": self.title,
             "published_date": self.published_date,
+            "published_at": self.published_at.isoformat() if self.published_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "retrieved_at": self.retrieved_at.isoformat() if self.retrieved_at else None,
+            "date_status": self.date_status,
             "author": self.author,
             "summary": self.summary,
             "content": self.content,
         }
 
+    def to_canonical(self) -> CanonicalArticleRecord:
+        return CanonicalArticleRecord(
+            url=self.url,
+            title=self.title,
+            author=self.author,
+            published_at=self.published_at,
+            updated_at=self.updated_at,
+            retrieved_at=self.retrieved_at or datetime.now(timezone.utc),
+            raw_published_date=self.published_date,
+            raw_updated_date=self.raw_updated_date,
+            date_status=self.date_status,
+            content=self.content,
+            summary=self.summary,
+            source_name="The Deep View",
+        )
+
 
 def extract_deep_view_content(html: str, page_url: str) -> DeepViewArticle:
     """Extract metadata and substantive article text from The Deep View HTML."""
+    retrieved_at = datetime.now(timezone.utc)
     parser = _SimpleHTMLTextExtractor()
     try:
         parser.feed(html)
@@ -390,6 +427,12 @@ def extract_deep_view_content(html: str, page_url: str) -> DeepViewArticle:
         or meta.get("pubdate")
         or ""
     )
+    updated_date = (
+        meta.get("article:modified_time")
+        or meta.get("og:updated_time")
+        or meta.get("last-modified")
+        or ""
+    )
 
     author = meta.get("author") or meta.get("article:author") or "The Deep View"
 
@@ -404,6 +447,8 @@ def extract_deep_view_content(html: str, page_url: str) -> DeepViewArticle:
                     title = str(data["headline"])
                 if not published_date and data.get("datePublished"):
                     published_date = str(data["datePublished"])
+                if not updated_date and data.get("dateModified"):
+                    updated_date = str(data["dateModified"])
                 if data.get("author"):
                     auth = data["author"]
                     if isinstance(auth, dict) and auth.get("name"):
@@ -412,6 +457,16 @@ def extract_deep_view_content(html: str, page_url: str) -> DeepViewArticle:
                         author = auth
         except Exception:
             continue
+
+    published_at = parse_iso_or_rfc_datetime(published_date)
+    updated_at = parse_iso_or_rfc_datetime(updated_date)
+
+    if published_at is not None:
+        date_status = "verified"
+    elif published_date and published_date != "Unknown Date":
+        date_status = "unverified"
+    else:
+        date_status = "missing"
 
     text = parser.get_clean_text()
 
@@ -448,6 +503,11 @@ def extract_deep_view_content(html: str, page_url: str) -> DeepViewArticle:
         author=author,
         content=text,
         summary=summary,
+        published_at=published_at,
+        updated_at=updated_at,
+        retrieved_at=retrieved_at,
+        date_status=date_status,
+        raw_updated_date=updated_date,
     )
 
 
@@ -523,14 +583,149 @@ def fetch_with_strict_redirects(
 
 
 class TheDeepViewRetriever:
-    """Manages discovery, search, and content extraction exclusively for The Deep View."""
+    """Manages discovery, search, and content extraction exclusively for The Deep View.
+
+    Implements a multi-tier temporal retrieval strategy:
+      - Tier 1 (Freshness & Breaking News): Official RSS 2.0 Feed (https://www.thedeepview.com/feed.xml) with verified RFC 2822 publication dates.
+      - Tier 2 (Chronological Archive): Reverse-chronological newsletter editions from https://www.thedeepview.com/newsletter.
+      - Tier 3 (Broad Topic Search): Sitemap-assisted search (https://www.thedeepview.com/sitemap.xml) with page-level publication verification.
+    """
 
     def __init__(self, client: Optional[httpx.Client] = None) -> None:
         self._client = client
         self._sitemap_cache: list[dict[str, str]] = []
         self._sitemap_fetched_at: Optional[datetime] = None
-        self._cache_ttl_seconds = 900  # 15 minutes
+        self._feed_cache: list[CanonicalArticleRecord] = []
+        self._feed_fetched_at: Optional[datetime] = None
+        self._newsletter_index_cache: list[str] = []
+        self._newsletter_index_fetched_at: Optional[datetime] = None
+        self._cache_ttl_seconds = 900  # 15 minutes for sitemap
+        self._feed_ttl_seconds = 300  # 5 minutes for active feed
         self._article_cache: dict[str, DeepViewArticle] = {}
+
+    def fetch_feed(self, force_refresh: bool = False) -> list[CanonicalArticleRecord]:
+        """Fetch and parse https://www.thedeepview.com/feed.xml (RSS 2.0)."""
+        now = datetime.now(timezone.utc)
+        if (
+            not force_refresh
+            and self._feed_cache
+            and self._feed_fetched_at
+            and (now - self._feed_fetched_at).total_seconds() < self._feed_ttl_seconds
+        ):
+            return list(self._feed_cache)
+
+        try:
+            xml_text, _ = fetch_with_strict_redirects(FEED_URL, client=self._client)
+        except Exception as exc:
+            logger.debug("Failed to fetch The Deep View feed: %s", exc)
+            if self._feed_cache:
+                return list(self._feed_cache)
+            return []
+
+        records: list[CanonicalArticleRecord] = []
+        item_blocks = re.findall(
+            r"<item>(.*?)</item>", xml_text, flags=re.DOTALL | re.IGNORECASE
+        )
+        for item in item_blocks:
+            title_m = re.search(
+                r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>",
+                item,
+                flags=re.IGNORECASE,
+            )
+            link_m = re.search(
+                r"<link>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>",
+                item,
+                flags=re.IGNORECASE,
+            )
+            pub_m = re.search(
+                r"<pubDate>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</pubDate>",
+                item,
+                flags=re.IGNORECASE,
+            )
+            author_m = re.search(
+                r"<author>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</author>",
+                item,
+                flags=re.IGNORECASE,
+            )
+            desc_m = re.search(
+                r"<description>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</description>",
+                item,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+
+            if not link_m:
+                continue
+
+            raw_url = link_m.group(1).strip()
+            if not is_valid_deep_view_url(raw_url):
+                continue
+
+            title = title_m.group(1).strip() if title_m else "The Deep View Article"
+            author = author_m.group(1).strip() if author_m else "The Deep View"
+            raw_pub = pub_m.group(1).strip() if pub_m else ""
+            pub_at = parse_iso_or_rfc_datetime(raw_pub)
+            desc = desc_m.group(1).strip() if desc_m else ""
+            clean_desc = re.sub(r"<[^>]+>", " ", desc).strip()
+
+            record = CanonicalArticleRecord(
+                url=raw_url,
+                title=title,
+                author=author,
+                published_at=pub_at,
+                updated_at=None,
+                retrieved_at=now,
+                raw_published_date=raw_pub,
+                date_status="verified" if pub_at else "missing",
+                content=clean_desc,
+                summary=clean_desc[:1200],
+                source_name="The Deep View",
+            )
+            records.append(record)
+
+        # Sort newest published_at first
+        records.sort(
+            key=lambda r: (r.published_at.timestamp() if r.published_at else 0.0),
+            reverse=True,
+        )
+        self._feed_cache = records
+        self._feed_fetched_at = now
+        return list(records)
+
+    def fetch_newsletter_index(self, force_refresh: bool = False) -> list[str]:
+        """Fetch chronological list of newsletter editions from https://www.thedeepview.com/newsletter."""
+        now = datetime.now(timezone.utc)
+        if (
+            not force_refresh
+            and self._newsletter_index_cache
+            and self._newsletter_index_fetched_at
+            and (now - self._newsletter_index_fetched_at).total_seconds()
+            < self._cache_ttl_seconds
+        ):
+            return list(self._newsletter_index_cache)
+
+        try:
+            html_text, _ = fetch_with_strict_redirects(
+                NEWSLETTER_ARCHIVE_URL, client=self._client
+            )
+        except Exception as exc:
+            logger.debug("Failed to fetch newsletter archive: %s", exc)
+            if self._newsletter_index_cache:
+                return list(self._newsletter_index_cache)
+            return []
+
+        pattern = re.compile(r'href=["\'](/newsletter/[^"\'#?]+)["\']')
+        links = pattern.findall(html_text)
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for l in links:
+            if l not in seen and l != "/newsletter":
+                full_url = f"https://www.thedeepview.com{l}"
+                seen.add(l)
+                ordered.append(full_url)
+
+        self._newsletter_index_cache = ordered
+        self._newsletter_index_fetched_at = now
+        return list(ordered)
 
     def fetch_sitemap(self, force_refresh: bool = False) -> list[dict[str, str]]:
         """Fetch and parse https://www.thedeepview.com/sitemap.xml."""
@@ -553,7 +748,6 @@ class TheDeepViewRetriever:
             raise
 
         entries: list[dict[str, str]] = []
-        # Parse XML with regex to stay robust across namespaces and corrupt tags
         url_blocks = re.findall(
             r"<url>(.*?)</url>", xml_text, flags=re.DOTALL | re.IGNORECASE
         )
@@ -571,40 +765,21 @@ class TheDeepViewRetriever:
                     lastmod = lastmod_match.group(1).strip() if lastmod_match else ""
                     entries.append({"url": raw_loc, "lastmod": lastmod})
 
-        # Sort entries: newest lastmod first
-        def _sort_key(item: dict[str, str]) -> str:
-            return item.get("lastmod", "")
-
-        entries.sort(key=_sort_key, reverse=True)
         self._sitemap_cache = entries
         self._sitemap_fetched_at = now
         return list(entries)
 
-    def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        """Search The Deep View articles and newsletters by relevance and recency."""
-        entries = self.fetch_sitemap()
-        if not entries:
-            return []
-
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        window: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Search The Deep View articles and newsletters by relevance and verified recency."""
         cleaned_query = (query or "").lower().strip()
-        # Tokenize query keywords (exclude common stop words, keep 'ai')
         stop_words = {
-            "the",
-            "a",
-            "an",
-            "is",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "of",
-            "and",
-            "or",
-            "what",
-            "how",
-            "deep",
-            "view",
+            "the", "a", "an", "is", "in", "on", "at", "to", "for",
+            "of", "and", "or", "what", "how", "deep", "view",
         }
         tokens = [
             t
@@ -612,32 +787,40 @@ class TheDeepViewRetriever:
             if (len(t) > 2 or t == "ai") and t not in stop_words
         ]
 
-        scored_entries: list[tuple[float, dict[str, str]]] = []
+        candidates: list[CanonicalArticleRecord] = []
+
+        # 1. Search recent feed items first (highest freshness fidelity)
+        try:
+            feed_items = self.fetch_feed()
+            for f in feed_items:
+                title_lower = f.title.lower()
+                desc_lower = f.content.lower()
+                matched = any(t in title_lower or t in desc_lower for t in tokens)
+                if matched or not tokens:
+                    candidates.append(f)
+        except Exception as exc:
+            logger.debug("Feed search error: %s", exc)
+
+        # 2. Search sitemap entries for broad keyword matching
+        sitemap_entries = []
+        try:
+            sitemap_entries = self.fetch_sitemap()
+        except Exception as exc:
+            logger.debug("Sitemap search error: %s", exc)
+
+        scored_sitemap: list[tuple[float, dict[str, str]]] = []
         is_news_query = any(
             k in cleaned_query
-            for k in (
-                "latest",
-                "recent",
-                "news",
-                "today",
-                "this week",
-                "new",
-                "update",
-                "updates",
-            )
+            for k in ("latest", "recent", "news", "today", "this week", "new", "update", "updates")
         )
 
-        for idx, entry in enumerate(entries):
+        for entry in sitemap_entries:
             url = entry["url"]
             path = urllib.parse.urlsplit(url).path.lower()
-
-            # Skip root homepage in search results
             if path in ("", "/"):
                 continue
 
             score = 0.0
-
-            # Favor newsletter editions for comprehensive digests, and article paths
             if "/newsletter/" in path:
                 score += 3.0
             elif "/articles/" in path:
@@ -646,7 +829,6 @@ class TheDeepViewRetriever:
             slug = path.split("/")[-1].replace("-", " ")
             slug_words = set(slug.split())
 
-            # Keyword matching
             matched_tokens = 0
             for token in tokens:
                 if token in slug_words:
@@ -667,84 +849,93 @@ class TheDeepViewRetriever:
             elif tokens and matched_tokens == 0 and not is_news_query:
                 continue
 
-            # Recency factor
-            if is_news_query or not tokens:
-                # Add recency points based on index in sitemap (which is sorted newest first)
-                recency_boost = max(0.0, 15.0 - (idx * 0.1))
-                score += recency_boost
-            else:
-                # Slight recency bonus
-                score += max(0.0, 5.0 - (idx * 0.05))
-
             if score > 1.0 or not tokens:
-                scored_entries.append((score, entry))
+                scored_sitemap.append((score, entry))
 
-        scored_entries.sort(key=lambda x: x[0], reverse=True)
-        top_candidates = [e for _, e in scored_entries[:limit]]
+        scored_sitemap.sort(key=lambda x: x[0], reverse=True)
 
-        # Retrieve and extract summaries for top candidates
-        results: list[dict[str, Any]] = []
-        for cand in top_candidates:
-            url = cand["url"]
+        # Inspect top sitemap candidate pages to extract genuine published_at
+        for _, entry in scored_sitemap[: max(limit, 5)]:
+            url = entry["url"]
             try:
                 article = self.read_article(url)
-                results.append(
-                    {
-                        "title": article.title,
-                        "url": article.url,
-                        "published_date": article.published_date
-                        or cand.get("lastmod", ""),
-                        "summary": article.summary,
-                        "author": article.author,
-                    }
-                )
+                candidates.append(article.to_canonical())
             except Exception as exc:
-                logger.debug("Failed to extract article at %s: %s", url, exc)
-                # Fallback to slug-derived info
-                slug_title = url.rstrip("/").split("/")[-1].replace("-", " ").title()
-                results.append(
-                    {
-                        "title": slug_title,
-                        "url": url,
-                        "published_date": cand.get("lastmod", "Recent"),
-                        "summary": f"Article from The Deep View ({url})",
-                        "author": "The Deep View",
-                    }
-                )
+                logger.debug("Failed reading candidate %s: %s", url, exc)
 
-        return results
+        deduped = deduplicate_articles(candidates)
+        in_win, out_win = filter_and_rank_by_freshness(deduped, window=window)
 
-    def get_latest_newsletters(self, limit: int = 3) -> list[dict[str, Any]]:
-        """Retrieve the newest accessible newsletter editions from The Deep View."""
-        entries = self.fetch_sitemap()
-        newsletters = [e for e in entries if "/newsletter/" in e["url"]]
-        if not newsletters:
-            # Fall back to newest articles if no dedicated /newsletter/ slug
-            newsletters = [e for e in entries if "/articles/" in e["url"]]
-
-        top_newsletters = newsletters[:limit]
+        results_records = in_win[:limit] if in_win else out_win[:limit]
         results: list[dict[str, Any]] = []
-
-        for item in top_newsletters:
-            url = item["url"]
-            try:
-                article = self.read_article(url)
-                results.append(article.to_dict())
-            except Exception as exc:
-                logger.debug("Error reading newsletter %s: %s", url, exc)
-                slug_title = url.rstrip("/").split("/")[-1].replace("-", " ").title()
-                results.append(
-                    {
-                        "title": slug_title,
-                        "url": url,
-                        "published_date": item.get("lastmod", ""),
-                        "summary": f"The Deep View Newsletter edition ({url})",
-                        "author": "The Deep View",
-                        "content": "",
-                    }
-                )
-
+        for r in results_records:
+            results.append(
+                {
+                    "title": r.title,
+                    "url": r.url,
+                    "published_date": r.format_published_display(),
+                    "published_at": r.published_at.isoformat() if r.published_at else None,
+                    "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                    "date_status": r.date_status,
+                    "summary": r.summary,
+                    "author": r.author,
+                }
+            )
         return results
+
+    def get_latest_newsletters(
+        self, limit: int = 5, window: str = "recent"
+    ) -> list[dict[str, Any]]:
+        """Retrieve the newest accessible newsletter editions in verified chronological order."""
+        candidates: list[CanonicalArticleRecord] = []
+
+        # Tier 1: Editorial reverse-chronological archive
+        try:
+            archive_urls = self.fetch_newsletter_index()
+            for url in archive_urls[: max(limit * 2, 8)]:
+                try:
+                    art = self.read_article(url)
+                    candidates.append(art.to_canonical())
+                except Exception as exc:
+                    logger.debug("Failed reading archive url %s: %s", url, exc)
+        except Exception as exc:
+            logger.debug("Newsletter index failed: %s", exc)
+
+        # Tier 2: Check RSS feed for latest published newsletters
+        try:
+            feed_items = self.fetch_feed()
+            for f in feed_items:
+                candidates.append(f)
+        except Exception as exc:
+            logger.debug("Feed fetch in latest_newsletters failed: %s", exc)
+
+        # Tier 3: Sitemap fallback if both index and feed were empty
+        if not candidates:
+            try:
+                entries = self.fetch_sitemap()
+                sitemap_newsletters = [
+                    e["url"] for e in entries if "/newsletter/" in e["url"]
+                ]
+                if not sitemap_newsletters:
+                    sitemap_newsletters = [
+                        e["url"] for e in entries if "/articles/" in e["url"]
+                    ]
+                for url in sitemap_newsletters[:limit]:
+                    try:
+                        art = self.read_article(url)
+                        candidates.append(art.to_canonical())
+                    except Exception as exc:
+                        logger.debug("Failed reading sitemap candidate %s: %s", url, exc)
+            except Exception as exc:
+                logger.debug("Sitemap fallback failed: %s", exc)
+
+        deduped = deduplicate_articles(candidates)
+        in_win, out_win = filter_and_rank_by_freshness(deduped, window=window)
+
+        # If in_window contains items matching requested freshness, use them;
+        # otherwise provide the latest available verified editorial editions.
+        selected = in_win[:limit] if in_win else out_win[:limit]
+        return [c.to_dict() for c in selected]
 
     def read_article(self, url: str) -> DeepViewArticle:
         """Fetch and extract substantive content of a specific approved Deep View page."""
@@ -768,6 +959,7 @@ class TheDeepViewTool(BaseTool):
 
     Enforces that all online research is restricted strictly to The Deep View.
     Rejects any other external domains, search engines, or unapproved URLs.
+    Guarantees temporal provenance and verified publication dates.
     """
 
     tool_id = "deep_view_search"
@@ -783,7 +975,7 @@ class TheDeepViewTool(BaseTool):
             description=(
                 "Search and retrieve AI news and newsletter articles exclusively from "
                 "The Deep View (https://www.thedeepview.com). Supports searching articles by topic, "
-                "retrieving latest newsletters, or reading full article text. "
+                "retrieving latest newsletters with verified publication dates, or reading full article text. "
                 "No other website or general search engine is permitted."
             ),
             parameters={
@@ -813,6 +1005,11 @@ class TheDeepViewTool(BaseTool):
                         "type": "integer",
                         "description": "Maximum number of articles to return (default 5).",
                     },
+                    "time_window": {
+                        "type": "string",
+                        "enum": ["today", "yesterday", "last_24h", "recent", "any"],
+                        "description": "Temporal freshness filter: 'today', 'last_24h', 'recent' (default), or 'any'.",
+                    },
                 },
             },
             category="search",
@@ -825,6 +1022,7 @@ class TheDeepViewTool(BaseTool):
         query = kwargs.get("query", "")
         url = kwargs.get("url", "")
         limit = kwargs.get("limit", 5)
+        window = kwargs.get("time_window") or kwargs.get("window", "recent")
 
         try:
             limit = int(limit)
@@ -843,6 +1041,9 @@ class TheDeepViewTool(BaseTool):
             else:
                 action = "search"
 
+        now_utc = datetime.now(timezone.utc)
+        now_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+
         try:
             if action == "read_article":
                 if not url:
@@ -852,10 +1053,16 @@ class TheDeepViewTool(BaseTool):
                         success=False,
                     )
                 article = self._retriever.read_article(url)
+                pub_display = (
+                    f"{article.published_at.strftime('%Y-%m-%d %H:%M UTC')} (Verified Published Date)"
+                    if article.published_at
+                    else f"{article.published_date} (Unverified)"
+                )
                 formatted = (
                     f"[The Deep View - Article Content]\n"
                     f"Title: {article.title}\n"
-                    f"Published Date: {article.published_date}\n"
+                    f"Publication Date: {pub_display}\n"
+                    f"Date Status: {article.date_status.title()}\n"
                     f"Author: {article.author}\n"
                     f"Source URL: {article.url}\n\n"
                     f"Substantive Content:\n{article.content[:12000]}\n"
@@ -868,23 +1075,39 @@ class TheDeepViewTool(BaseTool):
                 )
 
             elif action == "latest_newsletters":
-                newsletters = self._retriever.get_latest_newsletters(limit=limit)
+                newsletters = self._retriever.get_latest_newsletters(
+                    limit=limit, window=window
+                )
                 if not newsletters:
                     return ToolResult(
                         tool_name=self.tool_id,
-                        content="No newsletter editions found on The Deep View.",
+                        content="No newsletter editions found on The Deep View for the requested window.",
                         success=True,
                     )
 
                 chunks = [
-                    "[The Deep View - Latest Newsletters]\n"
-                    "Verified editorial content from The Deep View (https://www.thedeepview.com)."
+                    f"[The Deep View - Latest Newsletters]\n"
+                    f"Verified editorial content from The Deep View (https://www.thedeepview.com).\n"
+                    f"Current Retrieval Time: {now_str}\n"
+                    f"Temporal Grounding: Ground all dates strictly in the verified publication dates below."
                 ]
                 for i, item in enumerate(newsletters, 1):
+                    raw_pub = item.get("published_at")
+                    if raw_pub:
+                        dt_parsed = parse_iso_or_rfc_datetime(raw_pub)
+                        date_str = (
+                            dt_parsed.strftime("%Y-%m-%d %H:%M UTC")
+                            if dt_parsed
+                            else raw_pub
+                        )
+                    else:
+                        date_str = item.get("published_date") or "Unknown / Unverified"
+
+                    status = item.get("date_status", "unverified").title()
                     chunks.append(
                         f"--- Newsletter {i} ---\n"
                         f"Title: {item['title']}\n"
-                        f"Date: {item.get('published_date', 'Recent')}\n"
+                        f"Publication Date: {date_str} ({status})\n"
                         f"Source URL: {item['url']}\n"
                         f"Author: {item.get('author', 'The Deep View')}\n"
                         f"Key Takeaways & Overview:\n{item['summary']}\n"
@@ -899,7 +1122,9 @@ class TheDeepViewTool(BaseTool):
             else:  # search
                 if not query:
                     query = "latest AI news"
-                results = self._retriever.search(query=query, limit=limit)
+                results = self._retriever.search(
+                    query=query, limit=limit, window=window
+                )
                 if not results:
                     return ToolResult(
                         tool_name=self.tool_id,
@@ -912,13 +1137,17 @@ class TheDeepViewTool(BaseTool):
 
                 chunks = [
                     f"[The Deep View - Search Results for '{query}']\n"
-                    "Verified editorial content from The Deep View (https://www.thedeepview.com)."
+                    f"Verified editorial content from The Deep View (https://www.thedeepview.com).\n"
+                    f"Current Retrieval Time: {now_str}\n"
+                    f"Temporal Grounding: Ground all dates strictly in the verified publication dates below."
                 ]
                 for i, res in enumerate(results, 1):
+                    date_disp = res.get("published_date") or "Unknown / Unverified"
+                    status = res.get("date_status", "unverified").title()
                     chunks.append(
                         f"--- Article {i} ---\n"
                         f"Title: {res['title']}\n"
-                        f"Date: {res['published_date']}\n"
+                        f"Publication Date: {date_disp}\n"
                         f"Source URL: {res['url']}\n"
                         f"Author: {res.get('author', 'The Deep View')}\n"
                         f"Key Takeaways & Overview:\n{res['summary']}\n"

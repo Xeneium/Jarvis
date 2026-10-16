@@ -437,9 +437,24 @@ def chat(
         )
         system_prompt = builder.build()
 
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    current_date_str = now.strftime("%A, %B %d, %Y")
+    current_time_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    temporal_instructions = (
+        f"\n\n# Current Temporal Reference (Ground Truth Clock)\n"
+        f"- Current Date: {current_date_str}\n"
+        f"- Reference Timestamp: {current_time_str}\n"
+        f"- All relative temporal references ('today', 'yesterday', 'this week', 'recent', 'latest') "
+        f"must be anchored to {current_date_str}. Under no circumstances should you describe older cached data "
+        f"or articles from past weeks or months as 'today' or 'recent' without citing their exact publication date.\n"
+    )
+
     if default_exclusive:
-        system_prompt = (system_prompt or "") + (
-            "\n\n# The Deep View Web Research Policy\n"
+        system_prompt = (system_prompt or "") + temporal_instructions + (
+            "\n# The Deep View Web Research Policy\n"
             "- The Deep View (https://www.thedeepview.com) is your SOLE and EXCLUSIVE web research source.\n"
             "- For real-time, time-sensitive, or current AI news, use `deep_view_search`.\n"
             "- Do NOT consult or cite Google, Bing, DuckDuckGo, Tavily, or any other website.\n"
@@ -447,6 +462,8 @@ def chat(
             "- Ground all Deep View claims with citations (URL and publication date).\n"
             "- If The Deep View does not contain information on the topic, state that no relevant coverage was found on The Deep View."
         )
+    else:
+        system_prompt = (system_prompt or "") + temporal_instructions
 
     history: List[Message] = []
     if system_prompt:

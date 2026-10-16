@@ -7,7 +7,9 @@ implementation, not an integration with an external project.
 from __future__ import annotations
 
 import json
+import logging
 import re
+from datetime import datetime, timezone
 from typing import Any, List, Optional
 
 from openjarvis.agents._stubs import AgentContext, AgentResult, ToolUsingAgent
@@ -21,6 +23,8 @@ from openjarvis.core.types import Message, Role, ToolCall, ToolResult, _message_
 from openjarvis.engine._stubs import InferenceEngine
 from openjarvis.tools._stubs import BaseTool, build_tool_descriptions
 
+logger = logging.getLogger(__name__)
+
 REACT_SYSTEM_PROMPT = """\
 You are a ReAct agent. For each step, respond with exactly one of:
 
@@ -32,6 +36,12 @@ Action Input: <json arguments>
 2. To give a final answer:
 Thought: <your reasoning>
 Final Answer: <your answer>
+
+# Current Temporal Reference (Ground Truth Clock)
+- Current Date and Time: {current_time_str}
+- Reference Timestamp (UTC): {current_time_utc}
+- Today is: {current_day}, {current_date_str}
+- TEMPORAL GROUNDING RULES: All user queries referring to "latest", "recent", "today", "yesterday", "this week", or "current" MUST be anchored to {current_date_str}. Under no circumstances should you describe articles or events from past weeks or months as "today" or "recent" without explicitly citing their true publication date.
 
 # Deep View Web Research Exclusivity & Real-Time News Policy
 - MANDATORY TOOL USAGE: You DO NOT possess real-time or current news in your pretraining weights. For ANY query asking about recent AI news, updates, announcements, developments, newsletters, or current events (such as "What is the latest news in AI?", "What are the recent updates in AI?"), you MUST FIRST invoke `deep_view_search` with action="search" (query="AI" or the relevant topic) or action="latest_newsletters".
@@ -65,6 +75,65 @@ the response can take one of two forms:
   4. Synthesize a Final Answer from what you learned
 
 {skill_examples}{tool_descriptions}"""
+
+
+def _is_time_sensitive_news_query(query: str) -> bool:
+    """Detect if a user prompt is requesting latest or real-time news/updates."""
+    q = query.lower()
+    time_markers = (
+        "latest",
+        "recent",
+        "recently",
+        "today",
+        "yesterday",
+        "this week",
+        "current",
+        "breaking",
+        "what's new",
+        "whats new",
+        "newsletter",
+        "news",
+        "updates",
+        "update",
+        "developments",
+    )
+    topic_markers = (
+        "ai",
+        "artificial intelligence",
+        "llm",
+        "model",
+        "tech",
+        "technology",
+        "deep view",
+        "deepview",
+        "openai",
+        "anthropic",
+        "google",
+        "meta",
+        "apple",
+        "microsoft",
+    )
+    has_time = any(m in q for m in time_markers)
+    has_topic = any(m in q for m in topic_markers)
+    has_news_phrase = any(
+        phrase in q
+        for phrase in (
+            "what is the latest",
+            "what are the latest",
+            "what's the latest",
+            "whats the latest",
+            "latest news",
+            "recent news",
+            "recent updates",
+            "latest updates",
+            "ai news",
+            "news in ai",
+            "updates on ai",
+            "deep view",
+            "deepview",
+        )
+    )
+    return has_news_phrase or (has_time and has_topic)
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -243,6 +312,14 @@ class NativeReActAgent(ToolUsingAgent):
     ) -> AgentResult:
         self._emit_turn_start(input)
 
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        current_time_str = now.strftime("%A, %B %d, %Y, %I:%M %p UTC")
+        current_date_str = now.strftime("%B %d, %Y")
+        current_time_utc = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        current_day = now.strftime("%A")
+
         # Build system prompt with rich tool descriptions
         tool_desc = build_tool_descriptions(self._tools)
         # Plan 2B I3: render optimized few-shot skill examples as a section
@@ -259,16 +336,27 @@ class NativeReActAgent(ToolUsingAgent):
         prompt_template = (
             load_system_prompt_override("native_react") or REACT_SYSTEM_PROMPT
         )
-        # External overrides may not include the {skill_examples} slot.
+        format_kwargs = {
+            "tool_descriptions": tool_desc,
+            "skill_examples": skill_examples_block,
+            "current_time_str": current_time_str,
+            "current_date_str": current_date_str,
+            "current_time_utc": current_time_utc,
+            "current_day": current_day,
+        }
         try:
-            system_prompt = prompt_template.format(
-                tool_descriptions=tool_desc,
-                skill_examples=skill_examples_block,
-            )
+            system_prompt = prompt_template.format(**format_kwargs)
         except KeyError:
-            system_prompt = prompt_template.format(tool_descriptions=tool_desc)
-            if skill_examples_block:
+            safe_kwargs = {
+                k: v for k, v in format_kwargs.items() if f"{{{k}}}" in prompt_template
+            }
+            system_prompt = prompt_template.format(**safe_kwargs)
+            if skill_examples_block and "{skill_examples}" not in prompt_template:
                 system_prompt = system_prompt + "\n\n" + skill_examples_block
+            if "{current_time_str}" not in prompt_template:
+                system_prompt = (
+                    f"Current Date and Time: {current_time_str}\n\n" + system_prompt
+                )
 
         messages = self._build_messages(input, context, system_prompt=system_prompt)
 
@@ -277,6 +365,16 @@ class NativeReActAgent(ToolUsingAgent):
             if ex.get("input") and ex.get("output"):
                 messages.insert(-1, Message(role=Role.USER, content=ex["input"]))
                 messages.insert(-1, Message(role=Role.ASSISTANT, content=ex["output"]))
+
+        # Forward tool specifications to inference engine if supported
+        tools_openai = [
+            t.to_openai_function()
+            for t in self._tools
+            if hasattr(t, "to_openai_function")
+        ]
+        extra_gen_kwargs: dict[str, Any] = {}
+        if tools_openai:
+            extra_gen_kwargs["tools"] = tools_openai
 
         all_tool_results: list[ToolResult] = []
         turns = 0
@@ -292,7 +390,7 @@ class NativeReActAgent(ToolUsingAgent):
             if self._loop_guard:
                 messages = self._loop_guard.compress_context(messages)
 
-            result = self._generate(messages)
+            result = self._generate(messages, **extra_gen_kwargs)
             usage = result.get("usage", {})
             for k in total_usage:
                 total_usage[k] += usage.get(k, 0)
@@ -305,6 +403,23 @@ class NativeReActAgent(ToolUsingAgent):
                 raw_tc = result["tool_calls"][0]
                 parsed["action"] = raw_tc.get("name", "")
                 parsed["action_input"] = raw_tc.get("arguments", "{}")
+
+            # Turn 1 Temporal Retrieval Guard: If query asks for latest/recent news,
+            # never allow ungrounded memory hallucinations on turn 1. Force deep_view_search.
+            if turns == 1 and not all_tool_results and _is_time_sensitive_news_query(input):
+                has_dv = any(
+                    getattr(t, "spec", None) and t.spec.name == "deep_view_search"
+                    for t in self._tools
+                )
+                if has_dv and not parsed.get("action"):
+                    logger.info("Enforcing Deep View retrieval guard for time-sensitive query: %r", input)
+                    parsed["action"] = "deep_view_search"
+                    q_lower = input.lower()
+                    if any(kw in q_lower for kw in ("robot", "agent", "chip", "quantum", "voice", "search", "vision")):
+                        parsed["action_input"] = json.dumps({"action": "search", "query": input, "limit": 10})
+                    else:
+                        parsed["action_input"] = json.dumps({"action": "latest_newsletters", "limit": 10})
+                    parsed["final_answer"] = ""
 
             if parsed.get("parse_error"):
                 self._emit_turn_end(turns=turns)
