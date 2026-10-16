@@ -73,7 +73,7 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OpenJarvis-DeepView/1.0"
 )
 
-MAX_PAGE_BYTES = 2_000_000  # 2MB response limit
+MAX_PAGE_BYTES = 5_000_000  # 5MB response limit (allows rich newsletter archive pages)
 REQUEST_TIMEOUT = httpx.Timeout(timeout=15.0, connect=5.0, read=10.0, write=5.0)
 
 
@@ -369,12 +369,14 @@ class DeepViewArticle:
     retrieved_at: Optional[datetime] = None
     date_status: str = "unverified"
     raw_updated_date: str = ""
+    editorial_date: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "url": self.url,
             "title": self.title,
             "published_date": self.published_date,
+            "editorial_date": self.editorial_date,
             "published_at": self.published_at.isoformat() if self.published_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "retrieved_at": self.retrieved_at.isoformat() if self.retrieved_at else None,
@@ -394,6 +396,7 @@ class DeepViewArticle:
             retrieved_at=self.retrieved_at or datetime.now(timezone.utc),
             raw_published_date=self.published_date,
             raw_updated_date=self.raw_updated_date,
+            editorial_date=self.editorial_date,
             date_status=self.date_status,
             content=self.content,
             summary=self.summary,
@@ -461,6 +464,58 @@ def extract_deep_view_content(html: str, page_url: str) -> DeepViewArticle:
     published_at = parse_iso_or_rfc_datetime(published_date)
     updated_at = parse_iso_or_rfc_datetime(updated_date)
 
+    # Extract human-visible editorial date from DOM (<time> tags, date paragraphs, bylines)
+    editorial_date = ""
+
+    # 1. Check <time> tag (prominently used on /articles/ pages)
+    time_matches = re.findall(
+        r"<time[^>]*>(.*?)</time>", html, flags=re.DOTALL | re.IGNORECASE
+    )
+    for tm in time_matches:
+        d_m = re.search(r"([A-Za-z]+\s+\d{1,2},?\s+\d{4})", tm)
+        if d_m:
+            editorial_date = d_m.group(1).replace("  ", " ").strip()
+            break
+
+    # 2. Check newsletter date element (used on /newsletter/ pages)
+    # e.g., <p class="text-gray-600 lg:text-xs text-xs">October 15, 2026</p>
+    if not editorial_date:
+        p_matches = re.findall(
+            r'<p[^>]*class=["\'][^"\']*(?:text-gray|date|font|jsx)[^"\']*["\'][^>]*>(.*?)</p>',
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for p in p_matches:
+            clean_p = re.sub(r"<[^>]+>", "", p).strip()
+            d_m = re.match(
+                r"^((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+202\d)$",
+                clean_p,
+            )
+            if d_m:
+                editorial_date = d_m.group(1)
+                break
+
+    # 3. Fallback: byline date search in top section of document
+    if not editorial_date:
+        top_slice = html[:20000]
+        d_m = re.search(
+            r"\b((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+202\d)\b",
+            top_slice,
+        )
+        if d_m:
+            editorial_date = d_m.group(1)
+
+    # If published_at was not found via meta tags, attempt parsing from editorial_date
+    if published_at is None and editorial_date:
+        published_at = parse_iso_or_rfc_datetime(editorial_date)
+
+    # If editorial_date was not extracted from DOM, derive from published_at
+    if not editorial_date and published_at:
+        if "/articles/" in page_url:
+            editorial_date = published_at.strftime("%b %d, %Y")
+        else:
+            editorial_date = published_at.strftime("%B %d, %Y")
+
     if published_at is not None:
         date_status = "verified"
     elif published_date and published_date != "Unknown Date":
@@ -508,6 +563,7 @@ def extract_deep_view_content(html: str, page_url: str) -> DeepViewArticle:
         retrieved_at=retrieved_at,
         date_status=date_status,
         raw_updated_date=updated_date,
+        editorial_date=editorial_date,
     )
 
 
@@ -666,6 +722,7 @@ class TheDeepViewRetriever:
             pub_at = parse_iso_or_rfc_datetime(raw_pub)
             desc = desc_m.group(1).strip() if desc_m else ""
             clean_desc = re.sub(r"<[^>]+>", " ", desc).strip()
+            editorial_date = pub_at.strftime("%b %d, %Y") if pub_at else ""
 
             record = CanonicalArticleRecord(
                 url=raw_url,
@@ -675,6 +732,7 @@ class TheDeepViewRetriever:
                 updated_at=None,
                 retrieved_at=now,
                 raw_published_date=raw_pub,
+                editorial_date=editorial_date,
                 date_status="verified" if pub_at else "missing",
                 content=clean_desc,
                 summary=clean_desc[:1200],
@@ -874,6 +932,7 @@ class TheDeepViewRetriever:
                     "title": r.title,
                     "url": r.url,
                     "published_date": r.format_published_display(),
+                    "editorial_date": r.editorial_date,
                     "published_at": r.published_at.isoformat() if r.published_at else None,
                     "updated_at": r.updated_at.isoformat() if r.updated_at else None,
                     "date_status": r.date_status,
@@ -901,13 +960,14 @@ class TheDeepViewRetriever:
         except Exception as exc:
             logger.debug("Newsletter index failed: %s", exc)
 
-        # Tier 2: Check RSS feed for latest published newsletters
-        try:
-            feed_items = self.fetch_feed()
-            for f in feed_items:
-                candidates.append(f)
-        except Exception as exc:
-            logger.debug("Feed fetch in latest_newsletters failed: %s", exc)
+        # Tier 2: Check RSS feed ONLY if newsletter archive was empty or failed
+        if not candidates:
+            try:
+                feed_items = self.fetch_feed()
+                for f in feed_items:
+                    candidates.append(f)
+            except Exception as exc:
+                logger.debug("Feed fetch in latest_newsletters failed: %s", exc)
 
         # Tier 3: Sitemap fallback if both index and feed were empty
         if not candidates:
@@ -1053,11 +1113,20 @@ class TheDeepViewTool(BaseTool):
                         success=False,
                     )
                 article = self._retriever.read_article(url)
-                pub_display = (
-                    f"{article.published_at.strftime('%Y-%m-%d %H:%M UTC')} (Verified Published Date)"
-                    if article.published_at
-                    else f"{article.published_date} (Unverified)"
-                )
+                if article.editorial_date:
+                    pub_display = (
+                        f"{article.editorial_date} (Verified Published Date)"
+                        if article.date_status == "verified"
+                        else f"{article.editorial_date} (Unverified)"
+                    )
+                elif article.published_at:
+                    pub_display = (
+                        f"{article.published_at.strftime('%Y-%m-%d %H:%M UTC')} (Verified Published Date)"
+                        if article.date_status == "verified"
+                        else f"{article.published_at.strftime('%Y-%m-%d %H:%M UTC')} (Unverified)"
+                    )
+                else:
+                    pub_display = f"{article.published_date} (Unverified)"
                 formatted = (
                     f"[The Deep View - Article Content]\n"
                     f"Title: {article.title}\n"
@@ -1092,18 +1161,20 @@ class TheDeepViewTool(BaseTool):
                     f"Temporal Grounding: Ground all dates strictly in the verified publication dates below."
                 ]
                 for i, item in enumerate(newsletters, 1):
+                    editorial = item.get("editorial_date")
                     raw_pub = item.get("published_at")
-                    if raw_pub:
-                        dt_parsed = parse_iso_or_rfc_datetime(raw_pub)
-                        date_str = (
-                            dt_parsed.strftime("%Y-%m-%d %H:%M UTC")
-                            if dt_parsed
-                            else raw_pub
-                        )
+                    dt_parsed = parse_iso_or_rfc_datetime(raw_pub) if raw_pub else None
+                    status = item.get("date_status", "unverified").title()
+
+                    if editorial and dt_parsed:
+                        date_str = f"{editorial} ({dt_parsed.strftime('%Y-%m-%d %H:%M UTC')})"
+                    elif editorial:
+                        date_str = editorial
+                    elif dt_parsed:
+                        date_str = dt_parsed.strftime("%B %d, %Y (%Y-%m-%d %H:%M UTC)")
                     else:
                         date_str = item.get("published_date") or "Unknown / Unverified"
 
-                    status = item.get("date_status", "unverified").title()
                     chunks.append(
                         f"--- Newsletter {i} ---\n"
                         f"Title: {item['title']}\n"
@@ -1143,7 +1214,6 @@ class TheDeepViewTool(BaseTool):
                 ]
                 for i, res in enumerate(results, 1):
                     date_disp = res.get("published_date") or "Unknown / Unverified"
-                    status = res.get("date_status", "unverified").title()
                     chunks.append(
                         f"--- Article {i} ---\n"
                         f"Title: {res['title']}\n"

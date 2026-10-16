@@ -378,3 +378,82 @@ def test_20_historical_news_remains_historical():
     assert not is_within_temporal_window(rec.published_at, "today", ref_now=REF_NOW)
     assert rec.published_at.year == 2023
     assert "2023" in rec.format_published_display()
+
+
+# ---------------------------------------------------------------------------
+# Test 21: Editorial date extraction and provenance matching live Deep View site
+# ---------------------------------------------------------------------------
+def test_21_editorial_date_extraction_and_provenance():
+    from openjarvis.tools.deep_view import extract_deep_view_content
+
+    # Article HTML with <time> tag
+    article_html = """<!DOCTYPE html>
+    <html><head><title>Anthropic Audit Push</title></head>
+    <body>
+      <time class="test-class" dateTime="2026-10-15T21:12:04.304Z">Oct 15, 2026<span>•</span>9:12pm UTC</time>
+      <p>Anthropic today announced independent safety audits.</p>
+    </body></html>"""
+
+    art = extract_deep_view_content(article_html, "https://www.thedeepview.com/articles/anthropic-audit")
+    assert art.editorial_date == "Oct 15, 2026"
+    assert art.published_at is not None
+    assert art.published_at.year == 2026
+    assert art.published_at.month == 10
+    assert art.published_at.day == 15
+
+    # Newsletter HTML with date paragraph
+    newsletter_html = """<!DOCTYPE html>
+    <html><head><title>The Music Industry AI Reckoning</title>
+      <meta property="article:published_time" content="2026-10-08T22:27:08.350Z"/>
+    </head>
+    <body>
+      <p class="text-gray-600 lg:text-xs text-xs">October 9, 2026</p>
+      <p>The music industry is facing its own Turing test.</p>
+    </body></html>"""
+
+    nl = extract_deep_view_content(newsletter_html, "https://www.thedeepview.com/newsletter/oct-9-edition")
+    assert nl.editorial_date == "October 9, 2026"
+    # Even though meta tag was evening of Oct 8, editorial_date matches the October 9 display
+    canonical_nl = nl.to_canonical()
+    assert canonical_nl.editorial_date == "October 9, 2026"
+    display = canonical_nl.format_published_display()
+    assert "October 9, 2026" in display
+    assert "2026-10-08 22:27 UTC" in display
+    assert "Verified" in display
+
+
+# ---------------------------------------------------------------------------
+# Test 22: Newsletter archive isolation from breaking RSS feed articles
+# ---------------------------------------------------------------------------
+def test_22_newsletter_archive_isolation():
+    from openjarvis.tools.deep_view import TheDeepViewRetriever, DeepViewArticle
+
+    retriever = TheDeepViewRetriever()
+    # Mock newsletter index returning true newsletter editions
+    retriever.fetch_newsletter_index = MagicMock(return_value=[
+        "https://www.thedeepview.com/newsletter/edition-oct-15",
+        "https://www.thedeepview.com/newsletter/edition-oct-14",
+    ])
+    # Mock read_article returning newsletter article
+    def mock_read(url):
+        return DeepViewArticle(
+            url=url,
+            title=f"Edition {url.split('/')[-1]}",
+            published_date="October 15, 2026",
+            author="The Deep View",
+            content="Substantive newsletter content",
+            summary="Newsletter summary",
+            published_at=datetime(2026, 10, 15, 11, 33, tzinfo=timezone.utc),
+            editorial_date="October 15, 2026",
+            date_status="verified",
+        )
+    retriever.read_article = MagicMock(side_effect=mock_read)
+    # Feed items should NOT be consulted when newsletter index succeeds
+    retriever.fetch_feed = MagicMock()
+
+    newsletters = retriever.get_latest_newsletters(limit=2)
+    assert len(newsletters) == 2
+    assert all("/newsletter/" in n["url"] for n in newsletters)
+    assert all(n["editorial_date"] == "October 15, 2026" for n in newsletters)
+    assert not retriever.fetch_feed.called
+

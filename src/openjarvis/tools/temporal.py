@@ -108,6 +108,16 @@ def parse_iso_or_rfc_datetime(val: Any) -> Optional[datetime]:
         except ValueError:
             return None
 
+    # 4. Human-readable editorial date patterns (e.g., 'October 15, 2026', 'Oct 15, 2026', '15 October 2026')
+    clean_editorial = re.sub(r"(\d+)(st|nd|rd|th)", r"\1", raw).replace(",", " ")
+    clean_editorial = re.sub(r"\s+", " ", clean_editorial).strip()
+    for fmt in ("%B %d %Y", "%b %d %Y", "%Y %m %d", "%d %B %Y", "%d %b %Y"):
+        try:
+            dt = datetime.strptime(clean_editorial, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
     return None
 
 
@@ -127,6 +137,7 @@ class CanonicalArticleRecord:
     content: str = ""
     summary: str = ""
     source_name: str = "The Deep View"
+    editorial_date: str = ""  # Clean human-visible editorial date (e.g. 'October 15, 2026' or 'Oct 15, 2026')
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -140,6 +151,7 @@ class CanonicalArticleRecord:
             "retrieved_at": self.retrieved_at.isoformat(),
             "raw_published_date": self.raw_published_date,
             "raw_updated_date": self.raw_updated_date,
+            "editorial_date": self.editorial_date,
             "date_status": self.date_status,
             "summary": self.summary,
             "content": self.content,
@@ -148,6 +160,12 @@ class CanonicalArticleRecord:
 
     def format_published_display(self) -> str:
         """Return clear, disambiguated date presentation for users and LLMs."""
+        status = "Verified" if self.date_status == "verified" else "Unverified"
+        if self.editorial_date and self.published_at:
+            iso_str = self.published_at.strftime("%Y-%m-%d %H:%M UTC")
+            return f"{self.editorial_date} ({iso_str}) ({status})"
+        if self.editorial_date:
+            return f"{self.editorial_date} ({status})"
         if self.published_at:
             base = self.published_at.strftime("%Y-%m-%d %H:%M UTC")
             if self.date_status == "verified":
